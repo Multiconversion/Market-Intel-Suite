@@ -5,35 +5,165 @@ import pino from "pino";
 import { z } from "zod";
 import axios from "axios";
 import fs from "fs/promises";
-import fscore from "fs";
-import path from "path";
-import archiver from "archiver";
 import { JSONFile } from "lowdb/node";
 import { Low } from "lowdb";
 
-// Env
+// ==== Configuración inicial ====
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || "change-me";
 const DB_PATH = process.env.DB_PATH || "/app/data/db.json";
-const BILLING_PATH = process.env.BILLING_PATH || "/app/data/billing.json";
-const SIGNALS_PATH = process.env.SIGNALS_PATH || "/app/data/signals_events.json";
 
 const logger = pino({ level: process.env.NODE_ENV === "production" ? "info" : "debug" });
 
-// App & security
 const app = express();
 app.disable("x-powered-by");
 app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));
 app.use(express.json({ limit: "64kb" }));
 app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
 
-// Auth (except /healthz)
+// Middleware Auth
 app.use((req, res, next) => {
   if (req.path === "/healthz") return next();
   const key = req.headers["x-api-key"];
   if (!key || key !== API_KEY) return res.status(401).json({ error: "unauthorized" });
   next();
 });
+
+// ==== DB JSON ====
+const adapter = new JSONFile(DB_PATH);
+const db = new Low(adapter, { runs: [], leads: [] });
+await db.read();
+db.data ||= { runs: [], leads: [] };
+
+// ==== Config Providers ====
+const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true");
+const DFS_LOGIN = process.env.DFS_LOGIN;
+const DFS_PASSWORD = process.env.DFS_PASSWORD;
+const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // México
+const DFS_LANGUAGE_ID = Number(process.env.DFS_LANGUAGE_ID || 1002);    // Español
+
+// ==== Unit Costs ====
+const UNIT = {
+  DFS_SV_TASK: 0.075,
+  DFS_SERP_PAGE: 0.002,
+};
+
+// ==== HTTP client ====
+const http = axios.create({ timeout: 10000 });
+
+// ==== Health ====
+app.get("/healthz", async (_req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
+
+// ==== DataForSEO Wrappers corregidos ====
+async function dfsSearchVolume(keyword) {
+  if (!ENABLE_DATAFORSEO) return { sv: 12000, cpc: 1.2, cost: 0 };
+  const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
+  const payload = [{
+    language_id: DFS_LANGUAGE_ID,
+    location_code: DFS_LOCATION_CODE,
+    keywords: [keyword]
+  }];
+  try {
+    const { data } = await http.post(
+      "https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live",
+      payload,
+      { auth }
+    );
+    const item = data?.tasks?.[0]?.result?.[0]?.items?.[0] || {};
+    const sv = item.search_volume || 0;
+    const cpc = (item.cpc && item.cpc[0]?.value) || 0;
+    return { sv, cpc, cost: UNIT.DFS_SV_TASK };
+  } catch (e) {
+    logger.error({ msg: "DFS SV error", err: e.message });
+    return { sv: 0, cpc: 0, cost: 0 };
+  }
+}
+
+async function dfsSerpFeatures(keyword, pages = 1) {
+  if (!ENABLE_DATAFORSEO) return { paid_density: 0.6, serp_features_load: 0.5, volatility: 0.3, cost: 0 };
+  const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
+  const payload = [{
+    keyword,
+    language_id: DFS_LANGUAGE_ID,
+    location_code: DFS_LOCATION_CODE,
+    depth: pages * 10
+  }];
+  try {
+    const { data } = await http.post(
+      "https://api.dataforseo.com/v3/serp/google/organic/live/advanced",
+      payload,
+      { auth }
+    );
+    const items = data?.tasks?.[0]?.result?.[0]?.items || [];
+    const ads = items.filter(i => i.type === "ad").length;
+    const paid_density = Math.min(1, ads / (pages * 10));
+    const serp_features_load = Math.min(1, (items.filter(i => i.type !== "organic").length) / (pages * 10));
+    return { paid_density, serp_features_load, volatility: 0.2, cost: UNIT.DFS_SERP_PAGE * pages };
+  } catch (e) {
+    logger.error({ msg: "DFS SERP error", err: e.message });
+    return { paid_density: 0.5, serp_features_load: 0.5, volatility: 0.2, cost: 0 };
+  }
+}
+
+// ==== Score Run ====
+const ScoreRunSchema = z.object({
+  topic: z.string().min(3).max(160),
+  region: z.string().min(2).max(16).default("LATAM"),
+  language: z.string().min(2).max(5).default("es")
+});
+
+app.post("/score/run", async (req, res) => {
+  const parsed = ScoreRunSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "invalid_input", details: parsed.error.issues });
+  const { topic, region, language } = parsed.data;
+
+  let runCost = 0;
+
+  try {
+    // Urgency dummy
+    const U = 0;
+
+    // DataForSEO
+    const [sv, serp] = await Promise.all([
+      dfsSearchVolume(topic),
+      dfsSerpFeatures(topic, 1)
+    ]);
+    runCost += sv.cost + serp.cost;
+
+    // Build scores
+    const DemandIdx = Math.max(0, Math.min(1, Math.sqrt(sv.sv) / 110 - 0.3 * serp.paid_density));
+    const CompIdx = Math.max(0, Math.min(1, 1 - (0.55 + serp.paid_density + serp.serp_features_load) / 2.5 + 0.2 * serp.volatility));
+    const PlatFit = 0.6;
+    const Oper = 0.7;
+    const TtC = 24;
+    const GP = 18320;
+    const ProfitIdx = Math.max(0, Math.min(1, GP / 20000));
+    const gTtC = Math.max(0, Math.min(1, (30 - TtC) / 20));
+
+    const score = 25 * U + 15 * gTtC + 15 * ProfitIdx + 15 * DemandIdx + 15 * CompIdx + 10 * PlatFit + 5 * Oper;
+    const decision = (score >= 70 && U >= 0.6 && TtC <= 21) ? "GO" : (score >= 60 ? "CONDITIONAL" : "NO-GO");
+
+    res.json({
+      topic, region, language,
+      scores: {
+        total: Number(score.toFixed(2)), urgency: U, ttc_days: TtC, profit30d: GP,
+        demand: Number(DemandIdx.toFixed(2)), competition: Number(CompIdx.toFixed(2)),
+        platform_fit: Number(PlatFit.toFixed(2)), operability: Number(Oper.toFixed(2))
+      },
+      decision,
+      cost: { run_usd: Number(runCost.toFixed(3)) }
+    });
+
+  } catch (e) {
+    logger.error(e);
+    res.status(500).json({ error: "internal_error", detail: e.message });
+  }
+});
+
+// ==== Start ====
+app.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
 
 // Storage (LowDB)
 const adapter = new JSONFile(DB_PATH);
