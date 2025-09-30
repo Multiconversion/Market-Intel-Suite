@@ -67,7 +67,8 @@ const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true"
 const DFS_LOGIN = process.env.DFS_LOGIN;
 const DFS_PASSWORD = process.env.DFS_PASSWORD;
 const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // México
-const DFS_LANGUAGE_ID = Number(process.env.DFS_LANGUAGE_ID || 1002);    // Español
+const DFS_LANGUAGE_ID = Number(process.env.DFS_LANGUAGE_ID || 1002);    // Español (Search Volume)
+const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";        // Español (SERP)
 
 // ==== Unit Costs ====
 const UNIT = {
@@ -89,8 +90,8 @@ async function dfsSearchVolume(keyword) {
   if (!ENABLE_DATAFORSEO) return { sv: 12000, cpc: 1.2, cost: 0 };
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
   const payload = [{
-    language_id: DFS_LANGUAGE_ID,
     location_code: DFS_LOCATION_CODE,
+    language_id: DFS_LANGUAGE_ID,
     keywords: [keyword]
   }];
   try {
@@ -114,8 +115,8 @@ async function dfsSerpFeatures(keyword, pages=1) {
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
   const payload = [{
     keyword,
-    language_id: DFS_LANGUAGE_ID,
     location_code: DFS_LOCATION_CODE,
+    language_code: DFS_LANGUAGE_CODE,
     depth: pages*10
   }];
   try {
@@ -223,7 +224,7 @@ app.get("/leads/export", async (req, res) => {
   } catch (e) { res.status(500).send("error"); }
 });
 
-// ==== Capture Bootstrap (landing + assets) ====
+// ==== Capture Bootstrap ====
 app.use('/l', express.static('/app/data/sites', { extensions: ['html'] }));
 app.use('/exports', express.static('/app/data/exports'));
 
