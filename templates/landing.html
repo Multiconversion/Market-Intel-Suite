@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>{{TITLE}}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{{SUBTITLE}}">
+  <meta property="og:title" content="{{TITLE}}">
+  <meta property="og:description" content="{{SUBTITLE}}">
+  <meta property="og:image" content="{{OG_IMAGE}}">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script async src="https://www.googletagmanager.com/gtag/js?id={{GTAG_ID}}"></script>
+  <script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)};gtag('js',new Date());gtag('config','{{GTAG_ID}}');</script>
+</head>
+<body class="bg-white text-slate-800">
+  <section class="max-w-5xl mx-auto px-4 py-16 text-center">
+    <h1 class="text-4xl font-bold mb-4">{{TITLE}}</h1>
+    <p class="text-lg text-slate-600 mb-8">{{SUBTITLE}}</p>
+    <div class="grid md:grid-cols-3 gap-4 mb-10">
+      {{BENEFITS}}
+    </div>
+    <a href="#form" class="inline-block bg-black text-white px-6 py-3 rounded-xl hover:opacity-90">{{CTA}}</a>
+  </section>
+
+  <section id="form" class="max-w-3xl mx-auto px-4 pb-16">
+    <div class="bg-slate-50 border rounded-2xl p-6">
+      <h2 class="text-2xl font-semibold mb-4">Solicita tu demo</h2>
+      <form id="leadForm" class="grid gap-4">
+        <input name="name" type="text" placeholder="Tu nombre" class="border rounded-lg px-3 py-2" required>
+        <input name="email" type="email" placeholder="Tu email" class="border rounded-lg px-3 py-2" required>
+        <input name="company" type="text" placeholder="Empresa" class="border rounded-lg px-3 py-2">
+        <input name="phone" type="text" placeholder="Teléfono/WhatsApp" class="border rounded-lg px-3 py-2">
+        <textarea name="notes" placeholder="¿Qué necesitas?" class="border rounded-lg px-3 py-2"></textarea>
+        <button class="bg-black text-white px-5 py-3 rounded-lg hover:opacity-90" type="submit">Enviar</button>
+      </form>
+      <p id="ok" class="hidden text-green-700 mt-3">¡Gracias! Te contactamos en breve.</p>
+      <p id="err" class="hidden text-red-700 mt-3">Error al enviar. Inténtalo de nuevo.</p>
+    </div>
+  </section>
+
+  <section class="max-w-3xl mx-auto px-4 pb-24">
+    <h3 class="text-xl font-semibold mb-3">Reserva una llamada</h3>
+    <div class="border rounded-2xl p-2">
+      <iframe src="{{CALENDLY_URL}}" width="100%" height="660" frameborder="0"></iframe>
+    </div>
+  </section>
+
+  <a href="https://wa.me/{{WHATSAPP_INTL}}" target="_blank" class="fixed bottom-6 right-6 bg-green-500 text-white rounded-full p-4 shadow-lg" aria-label="WhatsApp">WA</a>
+
+  <script>
+    const f=document.getElementById('leadForm'),ok=document.getElementById('ok'),er=document.getElementById('err');
+    f.addEventListener('submit', async (e)=>{e.preventDefault();const p=Object.fromEntries(new FormData(f).entries());
+      try{const r=await fetch('/leads/collect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});if(!r.ok)throw new Error();
+        ok.classList.remove('hidden');er.classList.add('hidden');f.reset();
+      }catch(e){ok.classList.add('hidden');er.classList.remove('hidden');}});
+  </script>
+</body>
+</html>

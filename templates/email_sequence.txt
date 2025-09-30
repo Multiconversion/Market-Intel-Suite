@@ -1,0 +1,10 @@
+Asunto: ¿Te afecta [dolor] esta semana?
+Hola {{Nombre}},
+Veo que equipos como {{Empresa}} están sufriendo [dolor concreto]. Implementamos un sprint de 14–21 días que deja [resultado] medible.
+¿Te muestro en 15' cómo lo resolvemos?
+
+D+2 — Mini-playbook
+Hola {{Nombre}}, te dejo un esquema de 1 página de cómo resolvemos [dolor] en 3 pasos, con métricas. ¿Te encaja ver la demo?
+
+D+5 — Cierro hilo
+Si te encaja, te reenvío el one-pager y buscamos 15'. Si no aplica, dime y no insisto.

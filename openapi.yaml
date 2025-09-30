@@ -1,0 +1,90 @@
+openapi: 3.1.0
+info:
+  title: Market Intel Suite API
+  version: 1.0.0
+servers:
+  - url: https://YOUR-RENDER-URL
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+security:
+  - ApiKeyAuth: []
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        "200": { description: OK }
+  /signals/urgency:
+    get:
+      summary: Devuelve el score de urgencia (0..1) para vertical/region
+      parameters:
+        - in: query
+          name: vertical
+          schema: { type: string }
+        - in: query
+          name: region
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+  /score/run:
+    post:
+      summary: Calcula Score 2.0 + dictamen operativo (GO/CONDITIONAL/NO-GO)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [topic]
+              properties:
+                topic: { type: string }
+                region: { type: string, default: LATAM }
+                language: { type: string, default: es }
+                competitors:
+                  type: array
+                  items: { type: string, description: dominio competidor }
+                budget_soft: { type: number, description: limite $ por run (opcional) }
+      responses:
+        "200": { description: OK }
+  /leads/collect:
+    post:
+      summary: Recoge formularios de la landing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200": { description: OK }
+  /leads/export:
+    get:
+      summary: Exporta leads en CSV
+      responses:
+        "200": { description: OK }
+  /capture/bootstrap:
+    post:
+      summary: Genera landing y assets de captación para un slug
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug]
+              properties:
+                slug: { type: string }
+                title: { type: string }
+                subtitle: { type: string }
+                benefits: { type: array, items: { type: string } }
+                cta: { type: string }
+                whatsappIntl: { type: string }
+                calendlyUrl: { type: string }
+                gtagId: { type: string }
+                ogImage: { type: string }
+      responses:
+        "200": { description: OK }

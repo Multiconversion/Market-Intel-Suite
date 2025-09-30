@@ -1,0 +1,68 @@
+[
+  {
+    "id": "e1",
+    "vertical": "email",
+    "region": "LATAM",
+    "type": "platform",
+    "title": "Gmail/Yahoo bulk-sender: autenticaci\u00f3n y one-click",
+    "severity": 5,
+    "impact": 3.0,
+    "deadline": "2025-12-31",
+    "source_url": "https://support.google.com/"
+  },
+  {
+    "id": "e2",
+    "vertical": "whatsapp",
+    "region": "LATAM",
+    "type": "platform",
+    "title": "WhatsApp Business: cobro por mensaje (optimizar plantillas/flows)",
+    "severity": 4,
+    "impact": 2.5,
+    "deadline": "2025-12-31",
+    "source_url": "https://www.whatsapp.com/business/platform/pricing"
+  },
+  {
+    "id": "e3",
+    "vertical": "ecommerce",
+    "region": "LATAM",
+    "type": "platform",
+    "title": "Shopify: migraci\u00f3n Checkout Extensibility (Thank-you/Order)",
+    "severity": 4,
+    "impact": 2.0,
+    "deadline": "2025-08-28",
+    "source_url": "https://shopify.dev/"
+  },
+  {
+    "id": "e4",
+    "vertical": "security",
+    "region": "LATAM",
+    "type": "regulatory",
+    "title": "ISO 27001: transici\u00f3n 2022 (ventana final 2025)",
+    "severity": 4,
+    "impact": 3.0,
+    "deadline": "2025-10-31",
+    "source_url": "https://www.iso.org/"
+  },
+  {
+    "id": "e5",
+    "vertical": "payments",
+    "region": "LATAM",
+    "type": "regulatory",
+    "title": "PCI DSS v4.0: requisitos post-31/03/2025",
+    "severity": 5,
+    "impact": 3.5,
+    "deadline": "2025-03-31",
+    "source_url": "https://www.pcisecuritystandards.org/"
+  },
+  {
+    "id": "e6",
+    "vertical": "apps",
+    "region": "EU",
+    "type": "platform",
+    "title": "Apple DMA (UE): pagos alternativos/steering",
+    "severity": 4,
+    "impact": 3.0,
+    "deadline": "2025-12-31",
+    "source_url": "https://developer.apple.com/"
+  }
+]

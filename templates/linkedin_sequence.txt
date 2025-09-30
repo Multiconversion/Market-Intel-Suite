@@ -1,0 +1,5 @@
+Conexión:
+Hola {{Nombre}}, veo que lideras {{Rol}} en {{Empresa}}. Tengo un playbook de 1 página para resolver [dolor] en 3 semanas. Si te sirve, te lo paso.
+
+D+2:
+¿Te llegó el esquema? En 15' te enseño cómo dejamos [resultado] sin parar el día a día.
