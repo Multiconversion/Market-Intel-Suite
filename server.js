@@ -67,8 +67,7 @@ const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true"
 const DFS_LOGIN = process.env.DFS_LOGIN;
 const DFS_PASSWORD = process.env.DFS_PASSWORD;
 const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // México
-const DFS_LANGUAGE_ID = Number(process.env.DFS_LANGUAGE_ID || 1002);    // Español (Search Volume)
-const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";        // Español (SERP)
+const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";        // Español
 
 // ==== Unit Costs ====
 const UNIT = {
@@ -91,7 +90,7 @@ async function dfsSearchVolume(keyword) {
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
   const payload = [{
     location_code: DFS_LOCATION_CODE,
-    language_id: DFS_LANGUAGE_ID,
+    language_code: DFS_LANGUAGE_CODE,
     keywords: [keyword]
   }];
   try {
@@ -275,3 +274,4 @@ app.post("/capture/bootstrap", async (req, res) => {
 
 // ==== Start ====
 app.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
+
