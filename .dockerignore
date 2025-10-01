@@ -1,14 +1,14 @@
-# Git
+# VCS
 .git
 .gitignore
 
-# Dependencias locales (se instalan en el contenedor)
+# Node
 node_modules
 npm-debug.log
 yarn.lock
 pnpm-lock.yaml
 
-# Sistema / IDE
+# SO / IDE
 .DS_Store
 .vscode
 .idea
@@ -19,6 +19,6 @@ build
 coverage
 *.log
 
-# Archivos sensibles
+# Entornos
 .env
 .env.*
