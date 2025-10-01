@@ -3,36 +3,36 @@ info:
   title: Market Intel Suite API
   version: 1.0.0
 servers:
-  - url: https://YOUR-RENDER-URL
+  - url: https://tu-servicio.onrender.com
 components:
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
       in: header
       name: x-api-key
+  schemas: {}
 security:
   - ApiKeyAuth: []
 paths:
   /healthz:
     get:
+      operationId: getHealth
       summary: Health check
       responses:
-        "200": { description: OK }
-  /signals/urgency:
-    get:
-      summary: Devuelve el score de urgencia (0..1) para vertical/region
-      parameters:
-        - in: query
-          name: vertical
-          schema: { type: string }
-        - in: query
-          name: region
-          schema: { type: string }
-      responses:
-        "200": { description: OK }
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  month: { type: string }
+                  spent: { type: number }
   /score/run:
     post:
-      summary: Calcula Score 2.0 + dictamen operativo (GO/CONDITIONAL/NO-GO)
+      operationId: runScore
+      summary: Calcula Score 2.0 + dictamen operativo
       requestBody:
         required: true
         content:
@@ -44,47 +44,19 @@ paths:
                 topic: { type: string }
                 region: { type: string, default: LATAM }
                 language: { type: string, default: es }
-                competitors:
-                  type: array
-                  items: { type: string, description: dominio competidor }
-                budget_soft: { type: number, description: limite $ por run (opcional) }
       responses:
-        "200": { description: OK }
-  /leads/collect:
-    post:
-      summary: Recoge formularios de la landing
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-      responses:
-        "200": { description: OK }
-  /leads/export:
-    get:
-      summary: Exporta leads en CSV
-      responses:
-        "200": { description: OK }
-  /capture/bootstrap:
-    post:
-      summary: Genera landing y assets de captación para un slug
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [slug]
-              properties:
-                slug: { type: string }
-                title: { type: string }
-                subtitle: { type: string }
-                benefits: { type: array, items: { type: string } }
-                cta: { type: string }
-                whatsappIntl: { type: string }
-                calendlyUrl: { type: string }
-                gtagId: { type: string }
-                ogImage: { type: string }
-      responses:
-        "200": { description: OK }
+        "200":
+          description: Resultado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  decision: { type: string }
+                  scores:
+                    type: object
+                    properties:
+                      total: { type: number }
+                      urgency: { type: number }
+                      demand: { type: number }
+                      competition: { type: number }
