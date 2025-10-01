@@ -10,8 +10,9 @@ import path from "path";
 import archiver from "archiver";
 import { JSONFile } from "lowdb/node";
 import { Low } from "lowdb";
+import { XMLParser } from "fast-xml-parser";
 
-// ========= Config inicial =========
+// ========= Config base =========
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || "change-me";
 const DB_PATH = process.env.DB_PATH || "/app/data/db.json";
@@ -23,10 +24,10 @@ const logger = pino({ level: process.env.NODE_ENV === "production" ? "info" : "d
 const app = express();
 app.disable("x-powered-by");
 app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));
-app.use(express.json({ limit: "64kb" }));
+app.use(express.json({ limit: "128kb" }));
 app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
 
-// Auth
+// ========= Auth =========
 app.use((req, res, next) => {
   if (req.path === "/healthz") return next();
   const key = req.headers["x-api-key"];
@@ -34,19 +35,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// ========= LowDB =========
+// ========= DB =========
 const adapter = new JSONFile(DB_PATH);
 const db = new Low(adapter, { runs: [], leads: [] });
 await db.read();
 db.data ||= { runs: [], leads: [] };
 
-// ========= Signals & Billing =========
-async function loadSignals() {
-  const text = await fs.readFile(SIGNALS_PATH, "utf8").catch(()=> "[]");
-  try { return JSON.parse(text); } catch { return []; }
-}
-let signals = await loadSignals();
-
+// ========= Billing helpers =========
 async function loadBilling() {
   const text = await fs.readFile(BILLING_PATH, "utf8").catch(()=> null);
   if (!text) {
@@ -63,31 +58,40 @@ async function loadBilling() {
 async function saveBilling(b) { await fs.writeFile(BILLING_PATH, JSON.stringify(b, null, 2)); }
 function currentMonth() { return new Date().toISOString().slice(0,7); }
 
-// ========= Providers Config =========
+// ========= DataForSEO config =========
 const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true");
-
-// DataForSEO creds & locale
 const DFS_LOGIN = process.env.DFS_LOGIN;
 const DFS_PASSWORD = process.env.DFS_PASSWORD;
 const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX
 const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";        // es
 
-// Expansión de keywords
+// Demanda por bloques
 const ENABLE_DFS_KFK = /^true$/i.test(process.env.ENABLE_DFS_KFK || "false");
 const MAX_KEYWORDS_EXPANDED = Number(process.env.MAX_KEYWORDS_EXPANDED || 50);
+const DFS_SV_BATCH_SIZE = Math.min(1000, Math.max(1, Number(process.env.DFS_SV_BATCH_SIZE || 200))); // bloque seguro
+const DFS_SLEEP_MS = Math.max(0, Number(process.env.DFS_SLEEP_MS || 650)); // pausa entre tareas
 
-// ========= Costes unitarios =========
+// Urgency pesos (ajustables)
+const W_PROX  = Number(process.env.URGENCY_W_PROX  || 0.5);
+const W_SEV   = Number(process.env.URGENCY_W_SEV   || 0.3);
+const W_IMP   = Number(process.env.URGENCY_W_IMP   || 0.2);
+const B_NEWS  = Number(process.env.URGENCY_BOOST_NEWS  || 0.15);
+const B_FRESH = Number(process.env.URGENCY_BOOST_FRESH || 0.10);
+const B_PAT   = Number(process.env.URGENCY_BOOST_PATTERN||0.10);
+
+// ========= Costes unitarios (ajusta a tu plan) =========
 const UNIT = {
-  DFS_SV_TASK: 0.075,            // 1 batch SV (hasta 1000 kw)
-  DFS_SERP_PAGE: 0.002,          // 1 página SERP (10 resultados)
-  DFS_KFK_TASK: 0.12             // aproximado si activas KfK
+  DFS_SV_TASK: 0.075,            // por batch de Search Volume
+  DFS_SERP_PAGE: 0.002,          // por página (10 resultados)
+  DFS_KFK_TASK: 0.12             // aprox. por llamada KfK (no enviamos 'limit')
 };
 
-// ========= HTTP client =========
-const http = axios.create({ timeout: 10000 });
+// ========= HTTP =========
+const http = axios.create({ timeout: 12000 });
 
 // ========= Utils =========
 function ensureDir(p) { return fs.mkdir(p, { recursive: true }); }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function uniqNorm(arr){ const s=new Set(); const out=[]; for(const x of arr||[]){ const t=String(x||"").toLowerCase().trim(); if(t && !s.has(t)){ s.add(t); out.push(t); } } return out; }
 
 // ========= Health =========
@@ -96,7 +100,7 @@ app.get("/healthz", async (_req, res) => {
   res.json({ ok: true, month: billing.month, spent: billing.spent_usd });
 });
 
-// ========= SERP Features + señales =========
+// ========= SERP (features + señales + PAA/Related) =========
 async function dfsSerpFeatures(keyword, pages = 1) {
   if (!ENABLE_DATAFORSEO) {
     return { paid_density: 0.4, serp_features_load: 0.5, volatility: 0.2, cost: 0,
@@ -167,7 +171,7 @@ async function dfsSerpFeatures(keyword, pages = 1) {
   }
 }
 
-// ========= Keywords for Keywords =========
+// ========= KfK (sin 'limit' para evitar error; cortamos nosotros) =========
 async function dfsKeywordsForKeywords(seed) {
   if (!ENABLE_DATAFORSEO || !ENABLE_DFS_KFK) return { keywords: [], cost: 0 };
 
@@ -175,8 +179,8 @@ async function dfsKeywordsForKeywords(seed) {
   const payload = [{
     location_code: DFS_LOCATION_CODE,
     language_code: DFS_LANGUAGE_CODE,
-    keywords: [seed],
-    limit: Math.min(MAX_KEYWORDS_EXPANDED, 200) // 👈 importante
+    keywords: [seed]
+    // NOTA: este endpoint en algunos planes no acepta 'limit' -> lo quitamos
   }];
 
   try {
@@ -187,77 +191,105 @@ async function dfsKeywordsForKeywords(seed) {
     );
     const items = data?.tasks?.[0]?.result?.[0]?.items || [];
     const kws = items.map(it => String(it.keyword||"").trim()).filter(Boolean);
-    return { keywords: uniqNorm(kws), cost: UNIT.DFS_KFK_TASK };
+    // Cortamos localmente al máximo deseado
+    return { keywords: uniqNorm(kws).slice(0, MAX_KEYWORDS_EXPANDED), cost: UNIT.DFS_KFK_TASK };
   } catch (e) {
     logger.warn({ msg: "DFS KfK error", err: e.message });
     return { keywords: [], cost: 0 };
   }
 }
 
-// ========= Search Volume batch =========
-async function dfsSearchVolumeBatch(keywords){
+// ========= Heurística de expansión (fallback si KfK da poco) =========
+function heuristicExpand(topic){
+  const t = (topic||"").toLowerCase();
+  const bucket = [];
+  if (t.includes("pci")) {
+    bucket.push("pci dss v4.0", "auditoría pci", "certificación pci dss", "cumplimiento pci 2025",
+      "requisitos pci dss", "qsa pci", "saq pci dss", "controles pci dss", "normativa pci pagos",
+      "pci dss checklist 2025", "procesadores pagos pci", "servicio consultoría pci");
+  } else if (t.includes("shopify")) {
+    bucket.push("shopify checkout extensibility", "migración checkout shopify", "plantillas checkout shopify",
+      "apps checkout shopify", "custom checkout shopify", "checkout extensibility migration");
+  } else if (t.includes("whatsapp")) {
+    bucket.push("whatsapp business api precios", "plantillas whatsapp 2025", "gabinetes verificación whatsapp",
+      "enrutamiento conversaciones whatsapp", "wa cloud api pricing");
+  }
+  return bucket;
+}
+
+// ========= Search Volume por bloques =========
+async function dfsSearchVolumeChunks(keywords){
   if (!ENABLE_DATAFORSEO) {
-    return { cost:0, total_sv:10000, avg_cpc:1.2, items:[], trend:0.1, transactional_share:0.5 };
+    return { cost:0, total_sv:15000, avg_cpc:1.1, items:[], trend:0.12, transactional_share:0.6 };
   }
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
-  const payload = [{
-    location_code: DFS_LOCATION_CODE,
-    language_code: DFS_LANGUAGE_CODE,
-    keywords: keywords.slice(0, 1000)
-  }];
 
-  try {
-    const { data } = await http.post(
-      "https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live",
-      payload,
-      { auth }
-    );
-    const items = data?.tasks?.[0]?.result?.[0]?.items || [];
+  const chunks = [];
+  for (let i=0; i<keywords.length; i+=DFS_SV_BATCH_SIZE) {
+    chunks.push(keywords.slice(i, i+DFS_SV_BATCH_SIZE));
+  }
 
-    let total_sv = 0, w_cpc = 0, transCount = 0;
-    const months = new Map();
-    const isTransactional = (kw, cpc, comp) => {
-      const k = (kw||"").toLowerCase();
-      const patterns = ["precio","coste","comprar","proveedor","consultor","consultoría","auditor","servicio","software","herramienta","migración","implementación","mejor","oferta","tarifa","planes","apps","plugin"];
-      return patterns.some(p => k.includes(p)) || (cpc >= 0.5) || (comp >= 0.5);
-    };
+  let total_sv = 0, w_cpc = 0, transCount = 0, tasksCost = 0;
+  const months = new Map();
 
-    for (const it of items) {
-      const kw = String(it.keyword||"");
-      const sv = Number(it.search_volume || 0);
-      const cpc = Number((it.cpc && it.cpc[0]?.value) || 0);
-      const comp = Number(it.competition || 0);
+  const isTransactional = (kw, cpc, comp) => {
+    const k = (kw||"").toLowerCase();
+    const patterns = ["precio","coste","comprar","proveedor","consultor","consultoría","auditor","servicio",
+      "software","herramienta","migración","implementación","mejor","oferta","tarifa","planes","apps","plugin","tool"];
+    return patterns.some(p => k.includes(p)) || (cpc >= 0.5) || (comp >= 0.5);
+  };
 
-      total_sv += sv;
-      w_cpc += cpc * sv;
-      if (isTransactional(kw, cpc, comp)) transCount++;
+  for (let c=0; c<chunks.length; c++){
+    const payload = [{
+      location_code: DFS_LOCATION_CODE,
+      language_code: DFS_LANGUAGE_CODE,
+      keywords: chunks[c]
+    }];
 
-      const ms = it.monthly_searches || it.search_volume_by_month || [];
-      for (const m of ms) {
-        const y = m.year || m.month?.split("-")?.[0];
-        const mon = m.month || (m.month_num && String(m.month_num).padStart(2,"0"));
-        const key = (y && mon) ? `${y}-${mon}` : null;
-        const v = Number(m.search_volume || m.value || 0);
-        if (key) months.set(key, (months.get(key) || 0) + v);
+    try {
+      const { data } = await http.post(
+        "https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live",
+        payload,
+        { auth }
+      );
+      const items = data?.tasks?.[0]?.result?.[0]?.items || [];
+      for (const it of items) {
+        const kw = String(it.keyword||"");
+        const sv = Number(it.search_volume || 0);
+        const cpc = Number((it.cpc && it.cpc[0]?.value) || 0);
+        const comp = Number(it.competition || 0);
+        total_sv += sv;
+        w_cpc += cpc * sv;
+        if (isTransactional(kw, cpc, comp)) transCount++;
+
+        const ms = it.monthly_searches || it.search_volume_by_month || [];
+        for (const m of ms) {
+          const y = m.year || m.month?.split("-")?.[0];
+          const mon = m.month || (m.month_num && String(m.month_num).padStart(2,"0"));
+          const key = (y && mon) ? `${y}-${mon}` : null;
+          const v = Number(m.search_volume || m.value || 0);
+          if (key) months.set(key, (months.get(key) || 0) + v);
+        }
       }
+      tasksCost += UNIT.DFS_SV_TASK;
+    } catch (e) {
+      logger.error({ msg:"DFS SV chunk error", err:e.message });
     }
 
-    const avg_cpc = total_sv ? (w_cpc / total_sv) : 0;
-
-    const sortedMonths = Array.from(months.keys()).sort();
-    const last12 = sortedMonths.slice(-12);
-    const vals = last12.map(k => months.get(k) || 0);
-    const prev6 = vals.slice(0,6).reduce((a,b)=>a+b,0);
-    const last6 = vals.slice(-6).reduce((a,b)=>a+b,0);
-    const trend = prev6 > 0 ? (last6 - prev6) / prev6 : 0;
-
-    const transactional_share = items.length ? transCount/items.length : 0;
-
-    return { cost: UNIT.DFS_SV_TASK, total_sv, avg_cpc, items, trend, transactional_share };
-  } catch (e) {
-    logger.error({ msg:"DFS SV batch error", err:e.message });
-    return { cost:0, total_sv:0, avg_cpc:0, items:[], trend:0, transactional_share:0 };
+    // pausita entre llamadas para respetar límites (throttle)
+    if (c < chunks.length-1 && DFS_SLEEP_MS>0) await sleep(DFS_SLEEP_MS);
   }
+
+  const avg_cpc = total_sv ? (w_cpc/total_sv) : 0;
+  const sortedMonths = Array.from(months.keys()).sort();
+  const last12 = sortedMonths.slice(-12);
+  const vals = last12.map(k => months.get(k) || 0);
+  const prev6 = vals.slice(0,6).reduce((a,b)=>a+b,0);
+  const last6 = vals.slice(-6).reduce((a,b)=>a+b,0);
+  const trend = prev6 > 0 ? (last6 - prev6) / prev6 : 0;
+  const transactional_share = (keywords.length || 1) ? (transCount / Math.max(1, keywords.length)) : 0;
+
+  return { cost: tasksCost, total_sv, avg_cpc, trend, transactional_share };
 }
 
 // ========= Keyword set builder =========
@@ -268,7 +300,9 @@ async function buildKeywordSet(topic, serpSignals){
     .concat(serpSignals?.related || []);
   let kfk = { keywords:[], cost:0 };
   if (ENABLE_DFS_KFK) kfk = await dfsKeywordsForKeywords(topic);
-  const all = uniqNorm([...seeds, ...fromSerp, ...kfk.keywords]);
+  // Fallback heurístico si KfK trae poco
+  const heur = heuristicExpand(topic);
+  const all = uniqNorm([...seeds, ...fromSerp, ...kfk.keywords, ...heur]);
   return { keywords: all.slice(0, MAX_KEYWORDS_EXPANDED), cost: kfk.cost };
 }
 
@@ -281,7 +315,6 @@ function mapVertical(topic){
   if (t.includes("iso") || t.includes("pci") || t.includes("nis2") || t.includes("data act")) return "compliance";
   return "generic";
 }
-
 function computeUrgency(topic, region, serpSignals, allSignals){
   const vertical = mapVertical(topic);
   const today = new Date();
@@ -297,15 +330,14 @@ function computeUrgency(topic, region, serpSignals, allSignals){
       const prox = Math.max(0, 1 - Math.min(days,180)/180);
       const sev  = Math.min(Number(r.severity||0),5)/5;
       const imp  = Math.min(Number(r.impact||0),4)/4;
-      return 0.5*prox + 0.3*sev + 0.2*imp;
+      return W_PROX*prox + W_SEV*sev + W_IMP*imp;
     }));
   }
-
   let boost = 0;
-  if (serpSignals?.hasNews) boost += 0.15;
-  if ((serpSignals?.freshShare||0) >= 0.3) boost += 0.10;
+  if (serpSignals?.hasNews) boost += B_NEWS;
+  if ((serpSignals?.freshShare||0) >= 0.3) boost += B_FRESH;
   const pattern = /\b(202[4-9]|migraci[oó]n|requisitos|obligatorio|v\d(\.\d)?)\b/i;
-  if (pattern.test(String(topic))) boost += 0.10;
+  if (pattern.test(String(topic))) boost += B_PAT;
 
   return Math.max(0, Math.min(1, base + boost));
 }
@@ -326,12 +358,26 @@ function computeDemandIndex(batch){
   return Number(demandIdx.toFixed(2));
 }
 
-// ========= /score/run =========
+// ========= Health =========
+app.get("/healthz", async (_req, res) => {
+  const bill = await loadBilling();
+  res.json({ ok:true, month: bill.month, spent: bill.spent_usd });
+});
+
+// ========= SCORE RUN =========
 const ScoreRunSchema = z.object({
   topic: z.string().min(3).max(160),
   region: z.string().min(2).max(16).default("LATAM"),
   language: z.string().min(2).max(5).default("es")
 });
+
+let cachedSignals = null;
+async function getSignals(){
+  if (cachedSignals) return cachedSignals;
+  const txt = await fs.readFile(SIGNALS_PATH, "utf8").catch(()=> "[]");
+  try { cachedSignals = JSON.parse(txt); } catch { cachedSignals = []; }
+  return cachedSignals;
+}
 
 app.post("/score/run", async (req, res) => {
   const parsed = ScoreRunSchema.safeParse(req.body);
@@ -339,26 +385,40 @@ app.post("/score/run", async (req, res) => {
   const { topic, region, language } = parsed.data;
 
   try {
+    // 1) SERP
     const serp = await dfsSerpFeatures(topic, 1);
+
+    // 2) Keywords set (SERP + KfK + heurístico)
     const { keywords: kwSet, cost: kfkCost } = await buildKeywordSet(topic, serp.serp_signals);
-    const svBatch = await dfsSearchVolumeBatch(kwSet);
+
+    // 3) Search Volume en bloques
+    const svAgg = await dfsSearchVolumeChunks(kwSet);
+
+    // 4) Urgency 2.0 (carga de señales)
+    const signals = await getSignals();
     const U = computeUrgency(topic, region, serp.serp_signals, signals);
-    const DemandIdx = computeDemandIndex(svBatch);
+
+    // 5) Demand 2.0
+    const DemandIdx = computeDemandIndex(svAgg);
+
+    // 6) Competencia desde SERP
     const CompIdx = Math.max(0, Math.min(1,
       1 - (0.55 + serp.paid_density + serp.serp_features_load)/2.5 + 0.2*serp.volatility
     ));
 
-    const PlatFit = 0.7;
-    const Oper = 0.8;
+    // 7) Otros componentes
+    const PlatFit = 0.7, Oper = 0.8;
     const TtC = U >= 0.6 ? 14 : 24;
     const GP = 18320;
     const ProfitIdx = Math.max(0, Math.min(1, GP/20000));
     const gTtC = Math.max(0, Math.min(1, (30 - TtC)/20));
 
+    // 8) Score total y decisión
     const score = 25*U + 15*gTtC + 15*ProfitIdx + 15*DemandIdx + 15*CompIdx + 10*PlatFit + 5*Oper;
     const decision = (score>=70 && U>=0.6 && TtC<=21) ? "GO" : (score>=60 ? "CONDITIONAL" : "NO-GO");
 
-    const runCost = (serp.cost||0) + (svBatch.cost||0) + (kfkCost||0);
+    // 9) Coste + billing
+    const runCost = (serp.cost||0) + (svAgg.cost||0) + (kfkCost||0);
     const bill = await loadBilling();
     if (bill.month !== currentMonth()) { bill.month = currentMonth(); bill.spent_usd = 0; }
     bill.spent_usd += runCost; await saveBilling(bill);
@@ -379,10 +439,10 @@ app.post("/score/run", async (req, res) => {
       cost: { run_usd: Number(runCost.toFixed(3)), month_spent_usd: bill.spent_usd },
       demand_meta: {
         keywords_used: kwSet.length,
-        total_sv: svBatch.total_sv,
-        avg_cpc: Number(svBatch.avg_cpc.toFixed(2)),
-        trend_12m: Number(svBatch.trend.toFixed(2)),
-        transactional_share: Number(svBatch.transactional_share.toFixed(2))
+        total_sv: svAgg.total_sv,
+        avg_cpc: Number(svAgg.avg_cpc.toFixed(2)),
+        trend_12m: Number(svAgg.trend.toFixed(2)),
+        transactional_share: Number(svAgg.transactional_share.toFixed(2))
       },
       serp_meta: serp.serp_signals
     });
@@ -390,6 +450,130 @@ app.post("/score/run", async (req, res) => {
     logger.error(e);
     res.status(500).json({ error:"internal_error", detail:e.message });
   }
+});
+
+// ========= SIGNALS PRO (CRUD + Auto-Refresh) =========
+app.post("/signals/upsert", async (req,res)=>{
+  try{
+    const now = new Date().toISOString();
+    const raw = await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]");
+    const arr = JSON.parse(raw);
+    const obj = { ...req.body };
+    obj.id = obj.id || `sig_${Date.now()}`;
+    obj.updated_at = now;
+    const idx = arr.findIndex(s => s.id===obj.id);
+    if (idx>=0) arr[idx] = {...arr[idx], ...obj}; else arr.push(obj);
+    await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr, null, 2));
+    cachedSignals = null;
+    res.json({ok:true, id: obj.id, total: arr.length});
+  }catch(e){ res.status(500).json({ok:false, error:e.message}); }
+});
+
+app.get("/signals/list", async (req,res)=>{
+  try{
+    const { region, vertical, activeOnly } = req.query;
+    const raw = await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]");
+    let arr = JSON.parse(raw);
+    if (activeOnly==="true"){
+      const now = Date.now();
+      arr = arr.filter(s=>{
+        const ttl = Number(s.ttl_days||0);
+        if (!ttl) return true;
+        const base = new Date(s.updated_at||s.deadline||Date.now()).getTime();
+        return (now - base) <= (ttl*86400000);
+      });
+    }
+    const filtered = arr.filter(s =>
+      (!region || s.region===region) && (!vertical || s.vertical===vertical)
+    );
+    res.json({ok:true, total: filtered.length, signals: filtered});
+  }catch(e){ res.status(500).json({ok:false, error:e.message}); }
+});
+
+app.delete("/signals/delete", async (req,res)=>{
+  try{
+    const { id } = req.query;
+    if(!id) return res.status(400).json({ok:false, error:"id required"});
+    const raw = await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]");
+    let arr = JSON.parse(raw);
+    const before = arr.length;
+    arr = arr.filter(s => s.id !== id);
+    await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr, null, 2));
+    cachedSignals = null;
+    res.json({ok:true, removed: before-arr.length});
+  }catch(e){ res.status(500).json({ok:false, error:e.message}); }
+});
+
+// ---- Auto-refresh desde RSS/Atom (configurable por .env o archivo) ----
+const DEFAULT_SOURCES_PATH = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
+const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
+
+function guessVertical(title){
+  const t = (title||"").toLowerCase();
+  if (t.includes("pci")) return "compliance";
+  if (t.includes("nis2") || t.includes("data act")) return "compliance";
+  if (t.includes("shopify")) return "ecommerce";
+  if (t.includes("gmail") || t.includes("yahoo")) return "email";
+  if (t.includes("whatsapp")) return "whatsapp";
+  return "generic";
+}
+function guessRegionFromUrl(url){
+  if (!url) return process.env.SIGNALS_REGION_DEFAULT || "LATAM";
+  if (url.includes("europa.eu")) return "EU";
+  if (url.includes("pcisecurity")) return process.env.SIGNALS_REGION_DEFAULT || "LATAM";
+  return process.env.SIGNALS_REGION_DEFAULT || "LATAM";
+}
+function severityFromText(title){
+  const t = (title||"").toLowerCase();
+  if (t.includes("mandatory") || t.includes("obligatorio") || t.includes("deadline")) return 5;
+  if (t.includes("required") || t.includes("requisitos")) return 4;
+  return 3;
+}
+
+app.post("/signals/auto/refresh", async (req,res)=>{
+  try{
+    const srcText = await fs.readFile(DEFAULT_SOURCES_PATH,"utf8").catch(()=> "[]");
+    const sources = JSON.parse(srcText);
+    const raw = await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]");
+    const arr = JSON.parse(raw);
+
+    let added = 0;
+    for (const s of sources) {
+      try {
+        const { data } = await axios.get(s.url, { timeout: 12000 });
+        const xml = parser.parse(data);
+        const items = xml?.rss?.channel?.item || xml?.feed?.entry || [];
+        for (const it of items) {
+          const title = it.title?.["#text"] || it.title || it.name || "";
+          const link = it.link?.href || it.link || it.guid || "";
+          const pub = it.pubDate || it.published || it.updated || new Date().toISOString();
+          const vertical = s.vertical || guessVertical(title);
+          const region = s.region || guessRegionFromUrl(String(link));
+          const sev = s.severity || severityFromText(title);
+          const imp = s.impact || 3.0;
+
+          // Heurística de deadline: si en el título hay un año, sitúalo a final de ese año; si no, +90 días
+          const yearMatch = String(title).match(/\b(202[4-9])\b/);
+          const deadline = yearMatch ? `${yearMatch[1]}-12-31` :
+            new Date(Date.now()+90*86400000).toISOString().slice(0,10);
+
+          const id = `auto_${Buffer.from((title+link)).toString("base64").slice(0,12)}`;
+          const idx = arr.findIndex(x => x.id===id);
+          const obj = { id, vertical, region, type: s.type || "platform", title, severity: sev,
+                        impact: imp, deadline, source_url: link, ttl_days: s.ttl_days || 365,
+                        updated_at: new Date().toISOString() };
+          if (idx>=0) arr[idx] = { ...arr[idx], ...obj };
+          else { arr.push(obj); added++; }
+        }
+      } catch(e) {
+        logger.warn({ msg:"signals source error", url:s.url, err: e.message });
+      }
+    }
+
+    await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr, null, 2));
+    cachedSignals = null;
+    res.json({ ok:true, added, total: arr.length });
+  }catch(e){ res.status(500).json({ ok:false, error: e.message }); }
 });
 
 // ========= Leads =========
@@ -400,7 +584,6 @@ app.post("/leads/collect", async (req, res) => {
     res.json({ ok:true });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
-
 app.get("/leads/export", async (_req, res) => {
   try {
     const list = db.data.leads || [];
@@ -413,10 +596,11 @@ app.get("/leads/export", async (_req, res) => {
   } catch (e) { res.status(500).send("error"); }
 });
 
-// ========= Captación =========
+// ========= Captación: landings estáticas =========
 app.use("/l", express.static("/app/data/sites", { extensions:["html"] }));
 app.use("/exports", express.static("/app/data/exports"));
 
+// Bootstrap simple de landing + assets
 app.post("/capture/bootstrap", async (req, res) => {
   const { slug, title, subtitle, benefits=[], cta, whatsappIntl, calendlyUrl, gtagId, ogImage } = req.body;
   if(!slug) return res.status(400).json({ error:"slug required" });
@@ -462,16 +646,14 @@ app.post("/capture/bootstrap", async (req, res) => {
     </body></html>`;
     await fs.writeFile(path.join(siteDir, "index.html"), html, "utf8");
 
-    await fs.writeFile(path.join(expDir,"email_sequence.txt"), "Ejemplo secuencia emails", "utf8");
-    await fs.writeFile(path.join(expDir,"linkedin_sequence.txt"), "Ejemplo secuencia LinkedIn", "utf8");
+    await fs.writeFile(path.join(expDir,"email_sequence.txt"), "Secuencia emails (plantilla)", "utf8");
+    await fs.writeFile(path.join(expDir,"linkedin_sequence.txt"), "Secuencia LinkedIn (plantilla)", "utf8");
     await fs.writeFile(path.join(expDir,"google_ads_editor.csv"), "Campaign,...,etc", "utf8");
 
     const zipPath = `/app/data/exports/${slug}.zip`;
     const output = fscore.createWriteStream(zipPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.pipe(output);
-    archive.directory(expDir, false);
-    await archive.finalize();
+    archive.pipe(output); archive.directory(expDir, false); await archive.finalize();
 
     res.json({ ok:true, public_url:`/l/${slug}`, download_zip:`/exports/${slug}.zip` });
   } catch (e) {
@@ -480,4 +662,43 @@ app.post("/capture/bootstrap", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => logger.info(`Market Intel Suite on :${PORT}`));
+// ========= Lovable export: brief + assets ZIP =========
+app.post("/lovable/export", async (req,res)=>{
+  try{
+    const { slug, brand, offer, cta, palette=["#111","#06b6d4","#f59e0b"], notes="" } = req.body;
+    if(!slug) return res.status(400).json({error:"slug required"});
+    const expDir = `/app/data/exports/lovable_${slug}`;
+    await ensureDir(expDir);
+    const brief = `# Brief Lovable
+**Brand**: ${brand||slug}
+**Propuesta**: ${offer||"Implementación en 21 días"}
+**CTA**: ${cta||"Reserva una demo"}
+**Paleta**: ${palette.join(", ")}
+**Notas**: ${notes}
+
+## Secciones
+- Hero con titular y CTA
+- Beneficios (3-5)
+- Prueba social
+- Calendly embebido
+- Formulario (nombre, email, empresa, tel)
+`;
+    const logo = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80"><rect width="240" height="80" fill="${palette[1]||"#06b6d4"}"/><text x="12" y="50" font-size="28" font-family="Arial" fill="white">${brand||"Brand"}</text></svg>`;
+    await fs.writeFile(path.join(expDir,"brief.md"), brief, "utf8");
+    await fs.writeFile(path.join(expDir,"logo.svg"), logo, "utf8");
+    await fs.writeFile(path.join(expDir,"headlines.txt"), `Titulares:
+- Reduce el tiempo a valor a 21 días
+- Cumple PCI DSS v4 sin fricción
+- Pipeline de ventas listo en 2 semanas`, "utf8");
+
+    const zipPath = `/app/data/exports/${slug}_lovable.zip`;
+    const output = fscore.createWriteStream(zipPath);
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.pipe(output); archive.directory(expDir, false); await archive.finalize();
+
+    res.json({ ok:true, download_zip:`/exports/${slug}_lovable.zip` });
+  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
+});
+
+// ========= Start =========
+app.listen(PORT, () => logger.info(`Market Intel Suite running on :${PORT}`));
