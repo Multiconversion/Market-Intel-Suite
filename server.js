@@ -76,7 +76,7 @@ const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";        // es
 const ENABLE_DFS_KFK = /^true$/i.test(process.env.ENABLE_DFS_KFK || "false");
 const MAX_KEYWORDS_EXPANDED = Number(process.env.MAX_KEYWORDS_EXPANDED || 50);
 
-// ========= Costes unitarios (ajusta a tus precios) =========
+// ========= Costes unitarios =========
 const UNIT = {
   DFS_SV_TASK: 0.075,            // 1 batch SV (hasta 1000 kw)
   DFS_SERP_PAGE: 0.002,          // 1 página SERP (10 resultados)
@@ -96,7 +96,7 @@ app.get("/healthz", async (_req, res) => {
   res.json({ ok: true, month: billing.month, spent: billing.spent_usd });
 });
 
-// ========= DataForSEO: SERP Live Advanced (extrae señales + PAA/Related) =========
+// ========= SERP Features + señales =========
 async function dfsSerpFeatures(keyword, pages = 1) {
   if (!ENABLE_DATAFORSEO) {
     return { paid_density: 0.4, serp_features_load: 0.5, volatility: 0.2, cost: 0,
@@ -167,15 +167,16 @@ async function dfsSerpFeatures(keyword, pages = 1) {
   }
 }
 
-// ========= DataForSEO: Keywords for Keywords (opcional) =========
-async function dfsKeywordsForKeywords(seed){
-  if (!ENABLE_DATAFORSEO || !ENABLE_DFS_KFK) return { keywords:[], cost:0 };
+// ========= Keywords for Keywords =========
+async function dfsKeywordsForKeywords(seed) {
+  if (!ENABLE_DATAFORSEO || !ENABLE_DFS_KFK) return { keywords: [], cost: 0 };
+
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
   const payload = [{
     location_code: DFS_LOCATION_CODE,
     language_code: DFS_LANGUAGE_CODE,
     keywords: [seed],
-    limit: Math.min(MAX_KEYWORDS_EXPANDED, 200)
+    limit: Math.min(MAX_KEYWORDS_EXPANDED, 200) // 👈 importante
   }];
 
   try {
@@ -188,12 +189,12 @@ async function dfsKeywordsForKeywords(seed){
     const kws = items.map(it => String(it.keyword||"").trim()).filter(Boolean);
     return { keywords: uniqNorm(kws), cost: UNIT.DFS_KFK_TASK };
   } catch (e) {
-    logger.warn({ msg:"DFS KfK error", err:e.message });
-    return { keywords:[], cost:0 };
+    logger.warn({ msg: "DFS KfK error", err: e.message });
+    return { keywords: [], cost: 0 };
   }
 }
 
-// ========= DataForSEO: Search Volume batch =========
+// ========= Search Volume batch =========
 async function dfsSearchVolumeBatch(keywords){
   if (!ENABLE_DATAFORSEO) {
     return { cost:0, total_sv:10000, avg_cpc:1.2, items:[], trend:0.1, transactional_share:0.5 };
@@ -243,7 +244,6 @@ async function dfsSearchVolumeBatch(keywords){
 
     const avg_cpc = total_sv ? (w_cpc / total_sv) : 0;
 
-    // tendencia 12m
     const sortedMonths = Array.from(months.keys()).sort();
     const last12 = sortedMonths.slice(-12);
     const vals = last12.map(k => months.get(k) || 0);
@@ -286,7 +286,6 @@ function computeUrgency(topic, region, serpSignals, allSignals){
   const vertical = mapVertical(topic);
   const today = new Date();
 
-  // señales de fichero
   const relevant = (allSignals||[]).filter(ev =>
     (!vertical || ev.vertical===vertical) && (!region || ev.region===region)
   );
@@ -302,7 +301,6 @@ function computeUrgency(topic, region, serpSignals, allSignals){
     }));
   }
 
-  // boosts dinámicos
   let boost = 0;
   if (serpSignals?.hasNews) boost += 0.15;
   if ((serpSignals?.freshShare||0) >= 0.3) boost += 0.10;
@@ -322,7 +320,7 @@ function computeDemandIndex(batch){
   const svFactor = Math.min(1, Math.sqrt(sv)/220);
   const cpcFactor = Math.min(1, cpc/2);
   const trendClamp = Math.max(-0.5, Math.min(0.5, trend));
-  const trendFactor = (trendClamp + 0.5); // 0..1
+  const trendFactor = (trendClamp + 0.5);
 
   const demandIdx = 0.50*svFactor + 0.20*trans + 0.20*trendFactor + 0.10*cpcFactor;
   return Number(demandIdx.toFixed(2));
@@ -341,27 +339,15 @@ app.post("/score/run", async (req, res) => {
   const { topic, region, language } = parsed.data;
 
   try {
-    // 1) SERP → señales y extracción PAA/Related
     const serp = await dfsSerpFeatures(topic, 1);
-
-    // 2) Keyword set (SERP [+ KfK opcional])
     const { keywords: kwSet, cost: kfkCost } = await buildKeywordSet(topic, serp.serp_signals);
-
-    // 3) Search Volume batch en 1 task para todo el clúster
     const svBatch = await dfsSearchVolumeBatch(kwSet);
-
-    // 4) Urgency 2.0
     const U = computeUrgency(topic, region, serp.serp_signals, signals);
-
-    // 5) Demand 2.0
     const DemandIdx = computeDemandIndex(svBatch);
-
-    // 6) Competencia con señales del SERP
     const CompIdx = Math.max(0, Math.min(1,
       1 - (0.55 + serp.paid_density + serp.serp_features_load)/2.5 + 0.2*serp.volatility
     ));
 
-    // 7) Resto de componentes
     const PlatFit = 0.7;
     const Oper = 0.8;
     const TtC = U >= 0.6 ? 14 : 24;
@@ -369,11 +355,9 @@ app.post("/score/run", async (req, res) => {
     const ProfitIdx = Math.max(0, Math.min(1, GP/20000));
     const gTtC = Math.max(0, Math.min(1, (30 - TtC)/20));
 
-    // 8) Score total
     const score = 25*U + 15*gTtC + 15*ProfitIdx + 15*DemandIdx + 15*CompIdx + 10*PlatFit + 5*Oper;
     const decision = (score>=70 && U>=0.6 && TtC<=21) ? "GO" : (score>=60 ? "CONDITIONAL" : "NO-GO");
 
-    // 9) Coste run + billing
     const runCost = (serp.cost||0) + (svBatch.cost||0) + (kfkCost||0);
     const bill = await loadBilling();
     if (bill.month !== currentMonth()) { bill.month = currentMonth(); bill.spent_usd = 0; }
@@ -408,7 +392,7 @@ app.post("/score/run", async (req, res) => {
   }
 });
 
-// ========= Leads & Captación =========
+// ========= Leads =========
 app.post("/leads/collect", async (req, res) => {
   try {
     const lead = { ...req.body, ts: new Date().toISOString() };
@@ -429,11 +413,10 @@ app.get("/leads/export", async (_req, res) => {
   } catch (e) { res.status(500).send("error"); }
 });
 
-// Landings/exports estáticos
+// ========= Captación =========
 app.use("/l", express.static("/app/data/sites", { extensions:["html"] }));
 app.use("/exports", express.static("/app/data/exports"));
 
-// Bootstrap de captación
 app.post("/capture/bootstrap", async (req, res) => {
   const { slug, title, subtitle, benefits=[], cta, whatsappIntl, calendlyUrl, gtagId, ogImage } = req.body;
   if(!slug) return res.status(400).json({ error:"slug required" });
