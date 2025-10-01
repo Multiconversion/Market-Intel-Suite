@@ -94,6 +94,19 @@ function ensureDir(p) { return fs.mkdir(p, { recursive: true }); }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function uniqNorm(arr){ const s=new Set(); const out=[]; for(const x of arr||[]){ const t=String(x||"").toLowerCase().trim(); if(t && !s.has(t)){ s.add(t); out.push(t); } } return out; }
 
+// ========= Signals: resolver ruta de fuentes =========
+function resolveSourcesPath() {
+  const candidates = [
+    process.env.SIGNALS_SOURCES_PATH,                 // 1) ENV (si existe)
+    "/app/data/signals_sources.json",                 // 2) volumen persistente
+    "/opt/render/project/src/data/signals_sources.json" // 3) repo en Render
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try { if (fscore.existsSync(p)) return p; } catch {}
+  }
+  return null;
+}
+
 // ========= Health =========
 app.get("/healthz", async (_req, res) => {
   const billing = await loadBilling();
@@ -180,7 +193,6 @@ async function dfsKeywordsForKeywords(seed) {
     location_code: DFS_LOCATION_CODE,
     language_code: DFS_LANGUAGE_CODE,
     keywords: [seed]
-    // sin 'limit' para evitar "Unknown Fields: limit"
   }];
 
   try {
@@ -353,25 +365,6 @@ function computeDemandIndex(batch){
   return Number(demandIdx.toFixed(2));
 }
 
-// ========= Signals: resolver ruta de fuentes =========
-function resolveSourcesPath() {
-  const candidates = [
-    process.env.SIGNALS_SOURCES_PATH,
-    "/app/data/signals_sources.json",
-    "/opt/render/project/src/data/signals_sources.json"
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try { if (fscore.existsSync(p)) return p; } catch {}
-  }
-  return null;
-}
-
-// ========= Health (duplicado por convenio) =========
-app.get("/healthz", async (_req, res) => {
-  const billing = await loadBilling();
-  res.json({ ok:true, month: billing.month, spent: billing.spent_usd });
-});
-
 // ========= SCORE RUN =========
 const ScoreRunSchema = z.object({
   topic: z.string().min(3).max(160),
@@ -448,6 +441,7 @@ app.post("/score/run", async (req, res) => {
 });
 
 // ========= SIGNALS PRO =========
+// Upsert
 app.post("/signals/upsert", async (req,res)=>{
   try{
     const now = new Date().toISOString();
@@ -465,6 +459,7 @@ app.post("/signals/upsert", async (req,res)=>{
   }catch(e){ res.status(500).json({ok:false, error:e.message}); }
 });
 
+// List
 app.get("/signals/list", async (req,res)=>{
   try{
     const { region, vertical, activeOnly } = req.query;
@@ -486,6 +481,7 @@ app.get("/signals/list", async (req,res)=>{
   }catch(e){ res.status(500).json({ok:false, error:e.message}); }
 });
 
+// Delete
 app.delete("/signals/delete", async (req,res)=>{
   try{
     const { id } = req.query;
@@ -500,8 +496,7 @@ app.delete("/signals/delete", async (req,res)=>{
   }catch(e){ res.status(500).json({ok:false, error:e.message}); }
 });
 
-// ---- Auto-refresh desde RSS/Atom ----
-const DEFAULT_SOURCES_PATH = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
+// Auto-refresh
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
 function guessVertical(title){
@@ -525,22 +520,11 @@ function severityFromText(title){
   return 3;
 }
 
-function resolveSourcesPath() {
-  // prefer env, luego /app/data, luego repo src/data
-  const candidates = [
-    process.env.SIGNALS_SOURCES_PATH,
-    "/app/data/signals_sources.json",
-    "/opt/render/project/src/data/signals_sources.json"
-  ].filter(Boolean);
-  for (const p of candidates) {
-    try { if (fscore.existsSync(p)) return p; } catch {}
-  }
-  return null;
-}
-
 app.post("/signals/auto/refresh", async (req,res)=>{
   try{
-    const srcPath = resolveSourcesPath() || DEFAULT_SOURCES_PATH;
+    const srcPath = resolveSourcesPath();
+    if (!srcPath) return res.json({ ok:true, added:0, total:0, note:"signals_sources.json not found" });
+
     const srcText = await fs.readFile(srcPath,"utf8").catch(()=> "[]");
     const sources = JSON.parse(srcText);
     const raw = await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]");
@@ -567,7 +551,6 @@ app.post("/signals/auto/refresh", async (req,res)=>{
         for (const it of items) {
           const title = it.title?.["#text"] || it.title || it.name || "";
           const link = it.link?.href || it.link || it.guid || "";
-          const pub = it.pubDate || it.published || it.updated || new Date().toISOString();
           const vertical = s.vertical || guessVertical(title);
           const region = s.region || guessRegionFromUrl(String(link));
           const sev = s.severity || severityFromText(title);
@@ -596,7 +579,7 @@ app.post("/signals/auto/refresh", async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error: e.message }); }
 });
 
-// ========= Leads =========
+// ========= Leads & Captación =========
 app.post("/leads/collect", async (req, res) => {
   try { const lead = { ...req.body, ts: new Date().toISOString() };
     db.data.leads.push(lead); await db.write(); res.json({ ok:true });
@@ -614,11 +597,10 @@ app.get("/leads/export", async (_req, res) => {
   } catch (e) { res.status(500).send("error"); }
 });
 
-// ========= Landings estáticas / exports =========
+// ========= Estáticos & bootstrap =========
 app.use("/l", express.static("/app/data/sites", { extensions:["html"] }));
 app.use("/exports", express.static("/app/data/exports"));
 
-// ========= Bootstrap de captación =========
 app.post("/capture/bootstrap", async (req, res) => {
   const { slug, title, subtitle, benefits=[], cta, whatsappIntl, calendlyUrl, gtagId, ogImage } = req.body;
   if(!slug) return res.status(400).json({ error:"slug required" });
