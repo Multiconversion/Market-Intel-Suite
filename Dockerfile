@@ -1,18 +1,24 @@
-FROM node:18-alpine
+# Imagen base oficial de Node.js
+FROM node:18
 
+# Crea el directorio de trabajo dentro del contenedor
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm i --omit=dev
 
-COPY server.js ./server.js
-COPY openapi.yaml ./openapi.yaml
-COPY templates ./templates
+# Copia package.json y package-lock.json primero (mejora caché de dependencias)
+COPY package*.json ./
+
+# Instala dependencias (solo producción)
+RUN npm install --omit=dev
+
+# 👇 Asegura que se copie tu carpeta data al contenedor
 COPY data ./data
 
-# security: run as non-root
-RUN addgroup -S app && adduser -S app -G app
-USER app
+# Copia el resto del código fuente
+COPY . .
 
+# Expone el puerto de la app
 EXPOSE 3000
-ENV NODE_ENV=production
-CMD ["node", "server.js"]
+
+# Comando por defecto para iniciar el servicio
+CMD ["npm", "start"]
+
