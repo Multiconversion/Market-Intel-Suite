@@ -1,51 +1,47 @@
-# ==========================
-# 1) Builder
-# ==========================
-FROM node:18-alpine AS builder
+# ============================
+# Etapa de build
+# ============================
+FROM node:20-alpine AS builder
 
+# Crear directorio de trabajo
 WORKDIR /app
 
-# Copiar manifests de dependencias
+# Copiar package.json y package-lock.json si existe
 COPY package*.json ./
 
-# Instalar dependencias de producción
+# Instalar dependencias (sin dev)
 RUN npm install --omit=dev
 
-# Copiar el código necesario (incluida la carpeta data/)
-COPY server.js ./server.js
-COPY data ./data
+# Copiar el resto del código
+COPY . .
 
-# ==========================
-# 2) Runtime
-# ==========================
-FROM node:18-alpine AS runtime
+# ============================
+# Etapa de runtime
+# ============================
+FROM node:20-alpine AS runtime
 
-# Crear usuario no-root
+# Crear un usuario sin privilegios
 RUN addgroup -S app && adduser -S app -G app
 
 WORKDIR /app
 
-# Instalar curl para el healthcheck
-RUN apk add --no-cache curl
+# Copiar node_modules desde el builder
+COPY --from=builder /app/node_modules ./node_modules
 
-# Copiar artefactos desde el builder
-COPY --from=builder --chown=app:app /app/package.json ./package.json
-COPY --from=builder --chown=app:app /app/node_modules ./node_modules
-COPY --from=builder --chown=app:app /app/server.js ./server.js
-COPY --from=builder --chown=app:app /app/data ./data
+# Copiar package.json (útil para introspección)
+COPY --from=builder /app/package*.json ./
 
-# Variables de entorno por defecto
-ENV NODE_ENV=production
-ENV PORT=3000
+# Copiar código fuente
+COPY --from=builder /app/server.js ./server.js
+COPY --from=builder /app/data ./data
 
-# Healthcheck para Render
-HEALTHCHECK --interval=30s --timeout=5s --retries=5 \
-  CMD curl -fsS http://127.0.0.1:3000/healthz || exit 1
+# Ajustar permisos
+RUN chown -R app:app /app
 
-# Ejecutar como usuario no-root
 USER app
 
+# Exponer puerto (Render usará $PORT automáticamente)
 EXPOSE 3000
 
-# Ejecutar el servidor (Node en modo ESM con "type":"module" en package.json)
+# Comando de inicio
 CMD ["node", "server.js"]
