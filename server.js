@@ -20,7 +20,6 @@ const BILLING_PATH = process.env.BILLING_PATH || "/app/data/billing.json";
 const SIGNALS_PATH = process.env.SIGNALS_PATH || "/app/data/signals_events.json";
 
 const logger = pino({ level: process.env.NODE_ENV === "production" ? "info" : "debug" });
-
 const app = express();
 app.disable("x-powered-by");
 app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));
@@ -107,6 +106,7 @@ const DEFAULT_SIGNALS_SOURCES = [
 let SOURCES_PATH_RESOLVED = null;
 let SOURCES_ORIGIN = null;
 
+// -------- resolver rutas de fuentes + bootstrap (ÚNICA VERSIÓN) --------
 function candidatePaths() {
   return [
     process.env.SIGNALS_SOURCES_PATH,
@@ -119,25 +119,25 @@ async function tryWriteJson(filePath, obj){
   catch { return false; }
 }
 async function bootstrapSources() {
-  // ENV JSON crudo
+  // 1) ENV JSON crudo
   if (process.env.SIGNALS_SOURCES_JSON) {
     try {
       const parsed = JSON.parse(process.env.SIGNALS_SOURCES_JSON);
       const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
-      if (await tryWriteJson(target, parsed)) { SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "env_json"; return SOURCES_PATH_RESOLVED; }
+      if (await tryWriteJson(target, parsed)) { SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "env_json"; return target; }
     } catch (e) { logger.warn({msg:"Invalid SIGNALS_SOURCES_JSON", err:e.message}); }
   }
-  // ENV base64
+  // 2) ENV base64
   if (process.env.SIGNALS_SOURCES_B64) {
     try {
       const parsed = JSON.parse(Buffer.from(process.env.SIGNALS_SOURCES_B64,"base64").toString("utf8"));
       const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
-      if (await tryWriteJson(target, parsed)) { SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "env_b64"; return SOURCES_PATH_RESOLVED; }
+      if (await tryWriteJson(target, parsed)) { SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "env_b64"; return target; }
     } catch (e) { logger.warn({msg:"Invalid SIGNALS_SOURCES_B64", err:e.message}); }
   }
-  // Rutas candidatas
-  for (const p of candidatePaths()) { try { if (fscore.existsSync(p)) { SOURCES_PATH_RESOLVED = p; SOURCES_ORIGIN = "file_existing"; return p; } } catch {} }
-  // Fallback: crear default
+  // 3) Rutas candidatas
+  for (const p of candidatePaths()) { try { if (fscore.existsSync(p)) { SOURCES_PATH_RESOLVED = p; SOURCES_ORIGIN = "file_existing"; return p; } } catch {}
+  // 4) Fallback: crear default
   const fallback = "/app/data/signals_sources.json";
   if (await tryWriteJson(fallback, DEFAULT_SIGNALS_SOURCES)) { SOURCES_PATH_RESOLVED = fallback; SOURCES_ORIGIN = "default_bootstrap"; return fallback; }
   return null;
@@ -166,8 +166,10 @@ app.get("/signals/sources/debug", async (_req, res) => {
   res.json({ env:{ SIGNALS_SOURCES_PATH: envPath, has_JSON:envJson, has_B64:envB64, SIGNALS_PATH }, cwd:process.cwd(), candidates, resolved:SOURCES_PATH_RESOLVED, origin:SOURCES_ORIGIN, head_preview: head });
 });
 
+// ========= Parser XML (ÚNICA INSTANCIA) =========
+const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"" });
+
 // ========= SERP (features + señales + PAA/Related) =========
-const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 async function dfsSerpFeatures(keyword, pages = 1) {
   if (!ENABLE_DATAFORSEO) {
     return { paid_density: 0.4, serp_features_load: 0.5, volatility: 0.2, cost: 0,
@@ -224,7 +226,7 @@ function heuristicExpand(topic){
   return arr;
 }
 
-// ========= (NUEVO) Sanitizador de keywords =========
+// ========= Sanitizador de keywords (para DataForSEO) =========
 function sanitizeKeywords(keywords) {
   const MAX_LEN = 80;
   const BAD_CHARS = /[?¿“”"<>#%{}|\\^~\[\]]/g;
@@ -380,16 +382,6 @@ app.post("/score/run", async (req, res) => {
 });
 
 // ========= SIGNALS PRO =========
-// Sources debug
-app.get("/signals/sources/debug", async (_req,res)=>{
-  const envPath=process.env.SIGNALS_SOURCES_PATH||null;
-  const envJson=!!process.env.SIGNALS_SOURCES_JSON;
-  const envB64=!!process.env.SIGNALS_SOURCES_B64;
-  const candidates=candidatePaths().map(p=>{ let exists=false,size=null; try{ if(fscore.existsSync(p)){ const st=fscore.statSync(p); exists=true; size=st.size; } }catch{} return {path:p,exists,size}; });
-  let head=null; if (SOURCES_PATH_RESOLVED) { try{ head=(await fs.readFile(SOURCES_PATH_RESOLVED,"utf8")).slice(0,400);}catch{} }
-  res.json({env:{SIGNALS_SOURCES_PATH:envPath,has_JSON:envJson,has_B64:envB64, SIGNALS_PATH}, cwd:process.cwd(), candidates, resolved:SOURCES_PATH_RESOLVED, origin:SOURCES_ORIGIN, head_preview:head });
-});
-
 // Upsert señal procesada
 app.post("/signals/upsert", async (req,res)=>{
   try{ const now=new Date().toISOString(); await ensureDir(path.dirname(SIGNALS_PATH));
@@ -399,6 +391,7 @@ app.post("/signals/upsert", async (req,res)=>{
     await fs.writeFile(SIGNALS_PATH,JSON.stringify(arr,null,2)); cachedSignals=null; res.json({ok:true,id:obj.id,total:arr.length});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
+
 // List
 app.get("/signals/list", async (req,res)=>{
   try{ const {region,vertical,activeOnly}=req.query; const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); let arr=JSON.parse(raw);
@@ -407,6 +400,7 @@ app.get("/signals/list", async (req,res)=>{
     res.json({ok:true,total:filtered.length,signals:filtered});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
 });
+
 // Delete
 app.delete("/signals/delete", async (req,res)=>{
   try{ const {id}=req.query; if(!id) return res.status(400).json({ok:false,error:"id required"});
@@ -427,6 +421,7 @@ app.post("/signals/sources/put", async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
 });
 
+// Debug fuentes (ya arriba)
 // Auto-refresh (RSS/Atom)
 function guessVertical(title){ const t=(title||"").toLowerCase();
   if (t.includes("pci")) return "compliance";
@@ -438,12 +433,6 @@ function guessVertical(title){ const t=(title||"").toLowerCase();
 }
 function guessRegionFromUrl(url){ if (!url) return process.env.SIGNALS_REGION_DEFAULT || "LATAM"; if (url.includes("europa.eu")) return "EU"; return process.env.SIGNALS_REGION_DEFAULT || "LATAM"; }
 function severityFromText(title){ const t=(title||"").toLowerCase(); if (t.includes("mandatory")||t.includes("obligatorio")||t.includes("deadline")) return 5; if (t.includes("required")||t.includes("requisitos")) return 4; return 3; }
-
-const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"" });
-
-async function bootstrapSources(){
-  // declarado arriba; mantenido por claridad
-}
 
 app.post("/signals/auto/refresh", async (_req,res)=>{
   try{
@@ -505,7 +494,7 @@ app.get("/leads/export", async (_req,res)=>{ try{
 app.use("/l", express.static("/app/data/sites", { extensions:["html"] }));
 app.use("/exports", express.static("/app/data/exports"));
 app.post("/capture/bootstrap", async (req,res)=>{
-  const { slug, title, subtitle, benefits=[], cta, whatsappIntl, calendlyUrl, gtagId, ogImage }=req.body;
+  const { slug, title, subtitle, whatsappIntl, calendlyUrl, ogImage }=req.body;
   if(!slug) return res.status(400).json({error:"slug required"});
   const siteDir=`/app/data/sites/${slug}`, expRoot=`/app/data/exports`, expDir=`/app/data/exports/${slug}`;
   await ensureDir(siteDir); await ensureDir(expRoot); await ensureDir(expDir);
@@ -540,6 +529,7 @@ if(!r.ok) throw new Error(); ok.classList.remove('hidden'); er.classList.add('hi
 }catch(e){ ok.classList.add('hidden'); er.classList.remove('hidden'); }});
 </script></body></html>`;
     await fs.writeFile(path.join(siteDir,"index.html"), html, "utf8");
+    await ensureDir(expDir);
     await fs.writeFile(path.join(expDir,"email_sequence.txt"), "Secuencia emails (plantilla)", "utf8");
     await fs.writeFile(path.join(expDir,"linkedin_sequence.txt"), "Secuencia LinkedIn (plantilla)", "utf8");
     await fs.writeFile(path.join(expDir,"google_ads_editor.csv"), "Campaign,...,etc", "utf8");
