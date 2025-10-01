@@ -40,7 +40,7 @@ paths:
   /signals/upsert:
     post:
       operationId: upsertSignal
-      summary: Crea o actualiza una señal de urgencia
+      summary: Crea/actualiza una señal
       requestBody:
         required: true
         content:
@@ -51,7 +51,7 @@ paths:
   /signals/list:
     get:
       operationId: listSignals
-      summary: Lista señales (filtros opcionales)
+      summary: Lista señales (filtros)
       parameters:
         - in: query
           name: region
@@ -79,33 +79,5 @@ paths:
     post:
       operationId: autoRefreshSignals
       summary: Ingesta automática desde fuentes RSS/Atom
-      responses:
-        "200": { description: OK }
-  /capture/bootstrap:
-    post:
-      operationId: bootstrapCapture
-      summary: Genera landing y assets de captación (estáticos)
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [slug]
-              properties:
-                slug: { type: string }
-      responses:
-        "200": { description: OK }
-  /lovable/export:
-    post:
-      operationId: exportLovable
-      summary: Genera ZIP + brief para Lovable
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [slug]
       responses:
         "200": { description: OK }
