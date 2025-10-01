@@ -41,7 +41,7 @@ const db = new Low(adapter, { runs: [], leads: [] });
 await db.read();
 db.data ||= { runs: [], leads: [] };
 
-// ========= Billing helpers =========
+// ========= Billing =========
 async function loadBilling() {
   const text = await fs.readFile(BILLING_PATH, "utf8").catch(()=> null);
   if (!text) {
@@ -65,13 +65,13 @@ const DFS_PASSWORD = process.env.DFS_PASSWORD;
 const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX
 const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";        // es
 
-// Demanda por bloques
+// Expansión y batches
 const ENABLE_DFS_KFK = /^true$/i.test(process.env.ENABLE_DFS_KFK || "false");
-const MAX_KEYWORDS_EXPANDED = Number(process.env.MAX_KEYWORDS_EXPANDED || 50);
-const DFS_SV_BATCH_SIZE = Math.min(1000, Math.max(1, Number(process.env.DFS_SV_BATCH_SIZE || 200))); // bloque seguro
-const DFS_SLEEP_MS = Math.max(0, Number(process.env.DFS_SLEEP_MS || 650)); // pausa entre tareas
+const MAX_KEYWORDS_EXPANDED = Math.min(200, Math.max(1, Number(process.env.MAX_KEYWORDS_EXPANDED || 50)));
+const DFS_SV_BATCH_SIZE = Math.min(1000, Math.max(1, Number(process.env.DFS_SV_BATCH_SIZE || 200)));
+const DFS_SLEEP_MS = Math.max(0, Number(process.env.DFS_SLEEP_MS || 650));
 
-// Urgency pesos (ajustables)
+// Urgency pesos
 const W_PROX  = Number(process.env.URGENCY_W_PROX  || 0.5);
 const W_SEV   = Number(process.env.URGENCY_W_SEV   || 0.3);
 const W_IMP   = Number(process.env.URGENCY_W_IMP   || 0.2);
@@ -79,11 +79,11 @@ const B_NEWS  = Number(process.env.URGENCY_BOOST_NEWS  || 0.15);
 const B_FRESH = Number(process.env.URGENCY_BOOST_FRESH || 0.10);
 const B_PAT   = Number(process.env.URGENCY_BOOST_PATTERN||0.10);
 
-// ========= Costes unitarios (ajusta a tu plan) =========
+// ========= Costes (ajusta a tu plan) =========
 const UNIT = {
-  DFS_SV_TASK: 0.075,            // por batch de Search Volume
+  DFS_SV_TASK: 0.075,            // por batch search_volume
   DFS_SERP_PAGE: 0.002,          // por página (10 resultados)
-  DFS_KFK_TASK: 0.12             // aprox. por llamada KfK (no enviamos 'limit')
+  DFS_KFK_TASK: 0.12             // aprox. keywords_for_keywords
 };
 
 // ========= HTTP =========
@@ -171,7 +171,7 @@ async function dfsSerpFeatures(keyword, pages = 1) {
   }
 }
 
-// ========= KfK (sin 'limit' para evitar error; cortamos nosotros) =========
+// ========= Keywords for Keywords (sin 'limit'; cortamos local) =========
 async function dfsKeywordsForKeywords(seed) {
   if (!ENABLE_DATAFORSEO || !ENABLE_DFS_KFK) return { keywords: [], cost: 0 };
 
@@ -180,7 +180,7 @@ async function dfsKeywordsForKeywords(seed) {
     location_code: DFS_LOCATION_CODE,
     language_code: DFS_LANGUAGE_CODE,
     keywords: [seed]
-    // NOTA: este endpoint en algunos planes no acepta 'limit' -> lo quitamos
+    // sin 'limit' para evitar "Unknown Fields: limit"
   }];
 
   try {
@@ -191,7 +191,6 @@ async function dfsKeywordsForKeywords(seed) {
     );
     const items = data?.tasks?.[0]?.result?.[0]?.items || [];
     const kws = items.map(it => String(it.keyword||"").trim()).filter(Boolean);
-    // Cortamos localmente al máximo deseado
     return { keywords: uniqNorm(kws).slice(0, MAX_KEYWORDS_EXPANDED), cost: UNIT.DFS_KFK_TASK };
   } catch (e) {
     logger.warn({ msg: "DFS KfK error", err: e.message });
@@ -199,28 +198,28 @@ async function dfsKeywordsForKeywords(seed) {
   }
 }
 
-// ========= Heurística de expansión (fallback si KfK da poco) =========
+// ========= Heurística (fallback) =========
 function heuristicExpand(topic){
   const t = (topic||"").toLowerCase();
-  const bucket = [];
+  const arr = [];
   if (t.includes("pci")) {
-    bucket.push("pci dss v4.0", "auditoría pci", "certificación pci dss", "cumplimiento pci 2025",
-      "requisitos pci dss", "qsa pci", "saq pci dss", "controles pci dss", "normativa pci pagos",
-      "pci dss checklist 2025", "procesadores pagos pci", "servicio consultoría pci");
+    arr.push("pci dss v4.0","auditoría pci","certificación pci dss","cumplimiento pci 2025",
+      "requisitos pci dss","qsa pci","saq pci dss","controles pci dss","normativa pci pagos",
+      "pci dss checklist 2025","procesadores pagos pci","servicio consultoría pci");
   } else if (t.includes("shopify")) {
-    bucket.push("shopify checkout extensibility", "migración checkout shopify", "plantillas checkout shopify",
-      "apps checkout shopify", "custom checkout shopify", "checkout extensibility migration");
+    arr.push("shopify checkout extensibility","migración checkout shopify","plantillas checkout shopify",
+      "apps checkout shopify","custom checkout shopify","checkout extensibility migration");
   } else if (t.includes("whatsapp")) {
-    bucket.push("whatsapp business api precios", "plantillas whatsapp 2025", "gabinetes verificación whatsapp",
-      "enrutamiento conversaciones whatsapp", "wa cloud api pricing");
+    arr.push("whatsapp business api precios","plantillas whatsapp 2025","verificación whatsapp",
+      "enrutamiento conversaciones whatsapp","wa cloud api pricing");
   }
-  return bucket;
+  return arr;
 }
 
 // ========= Search Volume por bloques =========
 async function dfsSearchVolumeChunks(keywords){
   if (!ENABLE_DATAFORSEO) {
-    return { cost:0, total_sv:15000, avg_cpc:1.1, items:[], trend:0.12, transactional_share:0.6 };
+    return { cost:0, total_sv:15000, avg_cpc:1.1, trend:0.12, transactional_share:0.6 };
   }
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
 
@@ -258,8 +257,7 @@ async function dfsSearchVolumeChunks(keywords){
         const sv = Number(it.search_volume || 0);
         const cpc = Number((it.cpc && it.cpc[0]?.value) || 0);
         const comp = Number(it.competition || 0);
-        total_sv += sv;
-        w_cpc += cpc * sv;
+        total_sv += sv; w_cpc += cpc * sv;
         if (isTransactional(kw, cpc, comp)) transCount++;
 
         const ms = it.monthly_searches || it.search_volume_by_month || [];
@@ -275,8 +273,6 @@ async function dfsSearchVolumeChunks(keywords){
     } catch (e) {
       logger.error({ msg:"DFS SV chunk error", err:e.message });
     }
-
-    // pausita entre llamadas para respetar límites (throttle)
     if (c < chunks.length-1 && DFS_SLEEP_MS>0) await sleep(DFS_SLEEP_MS);
   }
 
@@ -292,7 +288,7 @@ async function dfsSearchVolumeChunks(keywords){
   return { cost: tasksCost, total_sv, avg_cpc, trend, transactional_share };
 }
 
-// ========= Keyword set builder =========
+// ========= buildKeywordSet =========
 async function buildKeywordSet(topic, serpSignals){
   const seeds = [topic];
   const fromSerp = []
@@ -300,7 +296,6 @@ async function buildKeywordSet(topic, serpSignals){
     .concat(serpSignals?.related || []);
   let kfk = { keywords:[], cost:0 };
   if (ENABLE_DFS_KFK) kfk = await dfsKeywordsForKeywords(topic);
-  // Fallback heurístico si KfK trae poco
   const heur = heuristicExpand(topic);
   const all = uniqNorm([...seeds, ...fromSerp, ...kfk.keywords, ...heur]);
   return { keywords: all.slice(0, MAX_KEYWORDS_EXPANDED), cost: kfk.cost };
@@ -358,10 +353,23 @@ function computeDemandIndex(batch){
   return Number(demandIdx.toFixed(2));
 }
 
-// ========= Health =========
+// ========= Signals: resolver ruta de fuentes =========
+function resolveSourcesPath() {
+  const candidates = [
+    process.env.SIGNALS_SOURCES_PATH,
+    "/app/data/signals_sources.json",
+    "/opt/render/project/src/data/signals_sources.json"
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try { if (fscore.existsSync(p)) return p; } catch {}
+  }
+  return null;
+}
+
+// ========= Health (duplicado por convenio) =========
 app.get("/healthz", async (_req, res) => {
-  const bill = await loadBilling();
-  res.json({ ok:true, month: bill.month, spent: bill.spent_usd });
+  const billing = await loadBilling();
+  res.json({ ok:true, month: billing.month, spent: billing.spent_usd });
 });
 
 // ========= SCORE RUN =========
@@ -374,8 +382,8 @@ const ScoreRunSchema = z.object({
 let cachedSignals = null;
 async function getSignals(){
   if (cachedSignals) return cachedSignals;
-  const txt = await fs.readFile(SIGNALS_PATH, "utf8").catch(()=> "[]");
-  try { cachedSignals = JSON.parse(txt); } catch { cachedSignals = []; }
+  try { cachedSignals = JSON.parse(await fs.readFile(SIGNALS_PATH, "utf8").catch(()=> "[]")); }
+  catch { cachedSignals = []; }
   return cachedSignals;
 }
 
@@ -385,39 +393,26 @@ app.post("/score/run", async (req, res) => {
   const { topic, region, language } = parsed.data;
 
   try {
-    // 1) SERP
     const serp = await dfsSerpFeatures(topic, 1);
-
-    // 2) Keywords set (SERP + KfK + heurístico)
     const { keywords: kwSet, cost: kfkCost } = await buildKeywordSet(topic, serp.serp_signals);
-
-    // 3) Search Volume en bloques
     const svAgg = await dfsSearchVolumeChunks(kwSet);
 
-    // 4) Urgency 2.0 (carga de señales)
     const signals = await getSignals();
     const U = computeUrgency(topic, region, serp.serp_signals, signals);
-
-    // 5) Demand 2.0
     const DemandIdx = computeDemandIndex(svAgg);
-
-    // 6) Competencia desde SERP
     const CompIdx = Math.max(0, Math.min(1,
       1 - (0.55 + serp.paid_density + serp.serp_features_load)/2.5 + 0.2*serp.volatility
     ));
 
-    // 7) Otros componentes
     const PlatFit = 0.7, Oper = 0.8;
     const TtC = U >= 0.6 ? 14 : 24;
     const GP = 18320;
     const ProfitIdx = Math.max(0, Math.min(1, GP/20000));
     const gTtC = Math.max(0, Math.min(1, (30 - TtC)/20));
 
-    // 8) Score total y decisión
     const score = 25*U + 15*gTtC + 15*ProfitIdx + 15*DemandIdx + 15*CompIdx + 10*PlatFit + 5*Oper;
     const decision = (score>=70 && U>=0.6 && TtC<=21) ? "GO" : (score>=60 ? "CONDITIONAL" : "NO-GO");
 
-    // 9) Coste + billing
     const runCost = (serp.cost||0) + (svAgg.cost||0) + (kfkCost||0);
     const bill = await loadBilling();
     if (bill.month !== currentMonth()) { bill.month = currentMonth(); bill.spent_usd = 0; }
@@ -452,7 +447,7 @@ app.post("/score/run", async (req, res) => {
   }
 });
 
-// ========= SIGNALS PRO (CRUD + Auto-Refresh) =========
+// ========= SIGNALS PRO =========
 app.post("/signals/upsert", async (req,res)=>{
   try{
     const now = new Date().toISOString();
@@ -463,6 +458,7 @@ app.post("/signals/upsert", async (req,res)=>{
     obj.updated_at = now;
     const idx = arr.findIndex(s => s.id===obj.id);
     if (idx>=0) arr[idx] = {...arr[idx], ...obj}; else arr.push(obj);
+    await ensureDir(path.dirname(SIGNALS_PATH));
     await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr, null, 2));
     cachedSignals = null;
     res.json({ok:true, id: obj.id, total: arr.length});
@@ -504,7 +500,7 @@ app.delete("/signals/delete", async (req,res)=>{
   }catch(e){ res.status(500).json({ok:false, error:e.message}); }
 });
 
-// ---- Auto-refresh desde RSS/Atom (configurable por .env o archivo) ----
+// ---- Auto-refresh desde RSS/Atom ----
 const DEFAULT_SOURCES_PATH = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
@@ -520,7 +516,6 @@ function guessVertical(title){
 function guessRegionFromUrl(url){
   if (!url) return process.env.SIGNALS_REGION_DEFAULT || "LATAM";
   if (url.includes("europa.eu")) return "EU";
-  if (url.includes("pcisecurity")) return process.env.SIGNALS_REGION_DEFAULT || "LATAM";
   return process.env.SIGNALS_REGION_DEFAULT || "LATAM";
 }
 function severityFromText(title){
@@ -530,9 +525,23 @@ function severityFromText(title){
   return 3;
 }
 
+function resolveSourcesPath() {
+  // prefer env, luego /app/data, luego repo src/data
+  const candidates = [
+    process.env.SIGNALS_SOURCES_PATH,
+    "/app/data/signals_sources.json",
+    "/opt/render/project/src/data/signals_sources.json"
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try { if (fscore.existsSync(p)) return p; } catch {}
+  }
+  return null;
+}
+
 app.post("/signals/auto/refresh", async (req,res)=>{
   try{
-    const srcText = await fs.readFile(DEFAULT_SOURCES_PATH,"utf8").catch(()=> "[]");
+    const srcPath = resolveSourcesPath() || DEFAULT_SOURCES_PATH;
+    const srcText = await fs.readFile(srcPath,"utf8").catch(()=> "[]");
     const sources = JSON.parse(srcText);
     const raw = await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]");
     const arr = JSON.parse(raw);
@@ -542,7 +551,19 @@ app.post("/signals/auto/refresh", async (req,res)=>{
       try {
         const { data } = await axios.get(s.url, { timeout: 12000 });
         const xml = parser.parse(data);
-        const items = xml?.rss?.channel?.item || xml?.feed?.entry || [];
+
+        let items = [];
+        if (xml?.rss?.channel?.item) items = xml.rss.channel.item;
+        else if (xml?.feed?.entry) items = xml.feed.entry;
+        else if (Array.isArray(xml?.rss?.item)) items = xml.rss.item;
+        else if (Array.isArray(xml?.entry)) items = xml.entry;
+
+        if (!Array.isArray(items)) items = [items].filter(Boolean);
+        if (!items.length) {
+          logger.warn({ msg:"no items found", source: s.url });
+          continue;
+        }
+
         for (const it of items) {
           const title = it.title?.["#text"] || it.title || it.name || "";
           const link = it.link?.href || it.link || it.guid || "";
@@ -552,16 +573,15 @@ app.post("/signals/auto/refresh", async (req,res)=>{
           const sev = s.severity || severityFromText(title);
           const imp = s.impact || 3.0;
 
-          // Heurística de deadline: si en el título hay un año, sitúalo a final de ese año; si no, +90 días
           const yearMatch = String(title).match(/\b(202[4-9])\b/);
           const deadline = yearMatch ? `${yearMatch[1]}-12-31` :
             new Date(Date.now()+90*86400000).toISOString().slice(0,10);
 
           const id = `auto_${Buffer.from((title+link)).toString("base64").slice(0,12)}`;
           const idx = arr.findIndex(x => x.id===id);
-          const obj = { id, vertical, region, type: s.type || "platform", title, severity: sev,
-                        impact: imp, deadline, source_url: link, ttl_days: s.ttl_days || 365,
-                        updated_at: new Date().toISOString() };
+          const obj = { id, vertical, region, type: s.type || "platform", title,
+                        severity: sev, impact: imp, deadline, source_url: link,
+                        ttl_days: s.ttl_days || 365, updated_at: new Date().toISOString() };
           if (idx>=0) arr[idx] = { ...arr[idx], ...obj };
           else { arr.push(obj); added++; }
         }
@@ -570,18 +590,16 @@ app.post("/signals/auto/refresh", async (req,res)=>{
       }
     }
 
+    await ensureDir(path.dirname(SIGNALS_PATH));
     await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr, null, 2));
-    cachedSignals = null;
     res.json({ ok:true, added, total: arr.length });
   }catch(e){ res.status(500).json({ ok:false, error: e.message }); }
 });
 
 // ========= Leads =========
 app.post("/leads/collect", async (req, res) => {
-  try {
-    const lead = { ...req.body, ts: new Date().toISOString() };
-    db.data.leads.push(lead); await db.write();
-    res.json({ ok:true });
+  try { const lead = { ...req.body, ts: new Date().toISOString() };
+    db.data.leads.push(lead); await db.write(); res.json({ ok:true });
   } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
 });
 app.get("/leads/export", async (_req, res) => {
@@ -596,11 +614,11 @@ app.get("/leads/export", async (_req, res) => {
   } catch (e) { res.status(500).send("error"); }
 });
 
-// ========= Captación: landings estáticas =========
+// ========= Landings estáticas / exports =========
 app.use("/l", express.static("/app/data/sites", { extensions:["html"] }));
 app.use("/exports", express.static("/app/data/exports"));
 
-// Bootstrap simple de landing + assets
+// ========= Bootstrap de captación =========
 app.post("/capture/bootstrap", async (req, res) => {
   const { slug, title, subtitle, benefits=[], cta, whatsappIntl, calendlyUrl, gtagId, ogImage } = req.body;
   if(!slug) return res.status(400).json({ error:"slug required" });
@@ -660,44 +678,6 @@ app.post("/capture/bootstrap", async (req, res) => {
     logger.error(e);
     res.status(500).json({ error:"bootstrap_failed", detail:e.message });
   }
-});
-
-// ========= Lovable export: brief + assets ZIP =========
-app.post("/lovable/export", async (req,res)=>{
-  try{
-    const { slug, brand, offer, cta, palette=["#111","#06b6d4","#f59e0b"], notes="" } = req.body;
-    if(!slug) return res.status(400).json({error:"slug required"});
-    const expDir = `/app/data/exports/lovable_${slug}`;
-    await ensureDir(expDir);
-    const brief = `# Brief Lovable
-**Brand**: ${brand||slug}
-**Propuesta**: ${offer||"Implementación en 21 días"}
-**CTA**: ${cta||"Reserva una demo"}
-**Paleta**: ${palette.join(", ")}
-**Notas**: ${notes}
-
-## Secciones
-- Hero con titular y CTA
-- Beneficios (3-5)
-- Prueba social
-- Calendly embebido
-- Formulario (nombre, email, empresa, tel)
-`;
-    const logo = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80"><rect width="240" height="80" fill="${palette[1]||"#06b6d4"}"/><text x="12" y="50" font-size="28" font-family="Arial" fill="white">${brand||"Brand"}</text></svg>`;
-    await fs.writeFile(path.join(expDir,"brief.md"), brief, "utf8");
-    await fs.writeFile(path.join(expDir,"logo.svg"), logo, "utf8");
-    await fs.writeFile(path.join(expDir,"headlines.txt"), `Titulares:
-- Reduce el tiempo a valor a 21 días
-- Cumple PCI DSS v4 sin fricción
-- Pipeline de ventas listo en 2 semanas`, "utf8");
-
-    const zipPath = `/app/data/exports/${slug}_lovable.zip`;
-    const output = fscore.createWriteStream(zipPath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.pipe(output); archive.directory(expDir, false); await archive.finalize();
-
-    res.json({ ok:true, download_zip:`/exports/${slug}_lovable.zip` });
-  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
 });
 
 // ========= Start =========
