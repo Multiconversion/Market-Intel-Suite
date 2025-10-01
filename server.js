@@ -113,6 +113,51 @@ app.get("/healthz", async (_req, res) => {
   res.json({ ok: true, month: billing.month, spent: billing.spent_usd });
 });
 
+// ========= DEBUG: ver rutas reales y preview =========
+app.get("/signals/debug", async (req, res) => {
+  const envPath = process.env.SIGNALS_SOURCES_PATH || null;
+  const candidates = [
+    envPath,
+    "/app/data/signals_sources.json",
+    "/opt/render/project/src/data/signals_sources.json"
+  ].filter(Boolean);
+
+  const checks = candidates.map(p => {
+    let exists = false; let size = null;
+    try {
+      if (fscore.existsSync(p)) {
+        const st = fscore.statSync(p);
+        exists = true; size = st.size;
+      }
+    } catch {}
+    return { path: p, exists, size };
+  });
+
+  const resolved = (() => {
+    for (const c of checks) if (c.exists) return c.path;
+    return null;
+  })();
+
+  let head = null;
+  if (resolved) {
+    try {
+      const txt = await fs.readFile(resolved, "utf8");
+      head = txt.slice(0, 400);
+    } catch {}
+  }
+
+  res.json({
+    env: {
+      SIGNALS_SOURCES_PATH: envPath,
+      SIGNALS_PATH: process.env.SIGNALS_PATH || null
+    },
+    cwd: process.cwd(),
+    candidates: checks,
+    resolved,
+    head_preview: head
+  });
+});
+
 // ========= SERP (features + señales + PAA/Related) =========
 async function dfsSerpFeatures(keyword, pages = 1) {
   if (!ENABLE_DATAFORSEO) {
