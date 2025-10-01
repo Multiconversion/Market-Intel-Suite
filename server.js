@@ -20,6 +20,7 @@ const BILLING_PATH = process.env.BILLING_PATH || "/app/data/billing.json";
 const SIGNALS_PATH = process.env.SIGNALS_PATH || "/app/data/signals_events.json";
 
 const logger = pino({ level: process.env.NODE_ENV === "production" ? "info" : "debug" });
+
 const app = express();
 app.disable("x-powered-by");
 app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));
@@ -45,9 +46,9 @@ function uniqNorm(arr){
 }
 
 // ========= DB =========
+await ensureDir(path.dirname(DB_PATH));
 const adapter = new JSONFile(DB_PATH);
 const db = new Low(adapter, { runs: [], leads: [] });
-await ensureDir(path.dirname(DB_PATH));
 await db.read();
 db.data ||= { runs: [], leads: [] };
 
@@ -106,7 +107,7 @@ const DEFAULT_SIGNALS_SOURCES = [
 let SOURCES_PATH_RESOLVED = null;
 let SOURCES_ORIGIN = null;
 
-// -------- resolver rutas de fuentes + bootstrap (ÚNICA VERSIÓN) --------
+// -------- resolver rutas de fuentes + bootstrap --------
 function candidatePaths() {
   return [
     process.env.SIGNALS_SOURCES_PATH,
@@ -166,7 +167,7 @@ app.get("/signals/sources/debug", async (_req, res) => {
   res.json({ env:{ SIGNALS_SOURCES_PATH: envPath, has_JSON:envJson, has_B64:envB64, SIGNALS_PATH }, cwd:process.cwd(), candidates, resolved:SOURCES_PATH_RESOLVED, origin:SOURCES_ORIGIN, head_preview: head });
 });
 
-// ========= Parser XML (ÚNICA INSTANCIA) =========
+// ========= Parser XML (única instancia) =========
 const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"" });
 
 // ========= SERP (features + señales + PAA/Related) =========
@@ -226,7 +227,7 @@ function heuristicExpand(topic){
   return arr;
 }
 
-// ========= Sanitizador de keywords (para DataForSEO) =========
+// ========= Sanitizador de keywords =========
 function sanitizeKeywords(keywords) {
   const MAX_LEN = 80;
   const BAD_CHARS = /[?¿“”"<>#%{}|\\^~\[\]]/g;
@@ -241,7 +242,7 @@ function sanitizeKeywords(keywords) {
   return { cleaned: uniqNorm(cleaned), rejected };
 }
 
-// ========= Search Volume por bloques (con sanitización) =========
+// ========= Search Volume por bloques =========
 async function dfsSearchVolumeChunks(keywords){
   if (!ENABLE_DATAFORSEO) return { cost:0, total_sv:15000, avg_cpc:1.1, trend:0.12, transactional_share:0.6 };
 
@@ -382,9 +383,11 @@ app.post("/score/run", async (req, res) => {
 });
 
 // ========= SIGNALS PRO =========
+
 // Upsert señal procesada
 app.post("/signals/upsert", async (req,res)=>{
-  try{ const now=new Date().toISOString(); await ensureDir(path.dirname(SIGNALS_PATH));
+  try{
+    const now=new Date().toISOString(); await ensureDir(path.dirname(SIGNALS_PATH));
     const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); const arr=JSON.parse(raw);
     const obj={...req.body}; obj.id=obj.id||`sig_${Date.now()}`; obj.updated_at=now;
     const idx=arr.findIndex(s=>s.id===obj.id); if (idx>=0) arr[idx]={...arr[idx],...obj}; else arr.push(obj);
@@ -394,8 +397,12 @@ app.post("/signals/upsert", async (req,res)=>{
 
 // List
 app.get("/signals/list", async (req,res)=>{
-  try{ const {region,vertical,activeOnly}=req.query; const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); let arr=JSON.parse(raw);
-    if (activeOnly==="true"){ const now=Date.now(); arr=arr.filter(s=>{ const ttl=Number(s.ttl_days||0); if(!ttl) return true; const base=new Date(s.updated_at||s.deadline||Date.now()).getTime(); return (now-base)<= (ttl*86400000); }); }
+  try{
+    const {region,vertical,activeOnly}=req.query;
+    const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); let arr=JSON.parse(raw);
+    if (activeOnly==="true"){ const now=Date.now();
+      arr=arr.filter(s=>{ const ttl=Number(s.ttl_days||0); if(!ttl) return true; const base=new Date(s.updated_at||s.deadline||Date.now()).getTime(); return (now-base)<= (ttl*86400000); });
+    }
     const filtered=arr.filter(s => (!region||s.region===region) && (!vertical||s.vertical===vertical));
     res.json({ok:true,total:filtered.length,signals:filtered});
   }catch(e){ res.status(500).json({ok:false,error:e.message}); }
@@ -421,7 +428,6 @@ app.post("/signals/sources/put", async (req,res)=>{
   }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
 });
 
-// Debug fuentes (ya arriba)
 // Auto-refresh (RSS/Atom)
 function guessVertical(title){ const t=(title||"").toLowerCase();
   if (t.includes("pci")) return "compliance";
