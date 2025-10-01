@@ -1,50 +1,46 @@
-# ================
+# ==========================
 # 1) Builder
-# ================
+# ==========================
 FROM node:18-alpine AS builder
-
-# Evita prompts y reduce tamaño
-ENV NODE_ENV=production
 
 WORKDIR /app
 
-# Copiamos manifests primero para cache de dependencias
+# Copiar manifest de dependencias
 COPY package*.json ./
 
-# Instala solo deps de producción, rápido y reproducible
-RUN npm ci --omit=dev
+# Instalar dependencias de producción
+RUN npm install --omit=dev
 
-# Copiamos solo lo necesario para runtime
-# (server, datos y openapi si lo sirves como estático)
+# Copiar código fuente necesario
 COPY server.js ./server.js
 COPY data ./data
 
-# ================
+# ==========================
 # 2) Runtime
-# ================
+# ==========================
 FROM node:18-alpine AS runtime
 
-# Crear usuario no-root y carpetas con permisos correctos
+# Crear usuario no-root
 RUN addgroup -S app && adduser -S app -G app
 
 WORKDIR /app
 
-# Copiar node_modules y código ya preparado del builder
+# Copiar node_modules y código desde builder
 COPY --from=builder --chown=app:app /app/node_modules ./node_modules
 COPY --from=builder --chown=app:app /app/server.js ./server.js
 COPY --from=builder --chown=app:app /app/data ./data
 
-# Variables por defecto (Render las puede sobrescribir)
+# Variables de entorno por defecto
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Salud del contenedor (wget viene en alpine)
+# Healthcheck para Render
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
 
-# Cambiar a usuario no-root
+# Ejecutar como usuario no-root
 USER app
 
 EXPOSE 3000
 
-# Ejecutar Node directamente (menos overhead que npm start)
+# Ejecutar el servidor
 CMD ["node", "server.js"]
