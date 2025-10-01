@@ -1,14 +1,14 @@
-# Git / VCS
+# Git
 .git
 .gitignore
 
-# Node
+# Dependencias locales
 node_modules
 npm-debug.log
 yarn.lock
 pnpm-lock.yaml
 
-# SO / IDE
+# Sistema / IDE
 .DS_Store
 .vscode
 .idea
@@ -19,7 +19,6 @@ build
 coverage
 *.log
 
-# Sensibles / temporales
+# Archivos sensibles
 .env
 .env.*
-*.swp
