@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: Market Intel Suite API
-  version: 1.0.0
+  version: 2.0.0
 servers:
-  - url: https://tu-servicio.onrender.com
+  - url: https://market-intel-suite.onrender.com
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -19,20 +19,11 @@ paths:
       operationId: getHealth
       summary: Health check
       responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  ok: { type: boolean }
-                  month: { type: string }
-                  spent: { type: number }
+        "200": { description: OK }
   /score/run:
     post:
       operationId: runScore
-      summary: Calcula Score 2.0 + dictamen operativo
+      summary: Calcula Score (Urgency 2.0 + Demand 2.0 por bloques)
       requestBody:
         required: true
         content:
@@ -45,18 +36,76 @@ paths:
                 region: { type: string, default: LATAM }
                 language: { type: string, default: es }
       responses:
-        "200":
-          description: Resultado
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  decision: { type: string }
-                  scores:
-                    type: object
-                    properties:
-                      total: { type: number }
-                      urgency: { type: number }
-                      demand: { type: number }
-                      competition: { type: number }
+        "200": { description: Resultado del score }
+  /signals/upsert:
+    post:
+      operationId: upsertSignal
+      summary: Crea o actualiza una señal de urgencia
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200": { description: OK }
+  /signals/list:
+    get:
+      operationId: listSignals
+      summary: Lista señales (filtros opcionales)
+      parameters:
+        - in: query
+          name: region
+          schema: { type: string }
+        - in: query
+          name: vertical
+          schema: { type: string }
+        - in: query
+          name: activeOnly
+          schema: { type: string, enum: ["true","false"] }
+      responses:
+        "200": { description: OK }
+  /signals/delete:
+    delete:
+      operationId: deleteSignal
+      summary: Elimina una señal por id
+      parameters:
+        - in: query
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: OK }
+  /signals/auto/refresh:
+    post:
+      operationId: autoRefreshSignals
+      summary: Ingesta automática desde fuentes RSS/Atom
+      responses:
+        "200": { description: OK }
+  /capture/bootstrap:
+    post:
+      operationId: bootstrapCapture
+      summary: Genera landing y assets de captación (estáticos)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug]
+              properties:
+                slug: { type: string }
+      responses:
+        "200": { description: OK }
+  /lovable/export:
+    post:
+      operationId: exportLovable
+      summary: Genera ZIP + brief para Lovable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug]
+      responses:
+        "200": { description: OK }
