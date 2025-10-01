@@ -12,7 +12,9 @@ import { JSONFile } from "lowdb/node";
 import { Low } from "lowdb";
 import { XMLParser } from "fast-xml-parser";
 
-// ========= Config base =========
+/* ==========================
+   Config & App
+========================== */
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || "change-me";
 const DB_PATH = process.env.DB_PATH || "/app/data/db.json";
@@ -20,14 +22,13 @@ const BILLING_PATH = process.env.BILLING_PATH || "/app/data/billing.json";
 const SIGNALS_PATH = process.env.SIGNALS_PATH || "/app/data/signals_events.json";
 
 const logger = pino({ level: process.env.NODE_ENV === "production" ? "info" : "debug" });
-
 const app = express();
 app.disable("x-powered-by");
 app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));
 app.use(express.json({ limit: "256kb" }));
 app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
 
-// ========= Auth =========
+/* Auth simple */
 app.use((req, res, next) => {
   if (req.path === "/healthz") return next();
   const key = req.headers["x-api-key"];
@@ -35,28 +36,27 @@ app.use((req, res, next) => {
   next();
 });
 
-// ========= Helpers =========
+/* ==========================
+   Helpers
+========================== */
 async function ensureDir(p) { await fs.mkdir(p, { recursive: true }); }
-function currentMonth() { return new Date().toISOString().slice(0,7); }
-function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
-function stripAccents(s){ return s.normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
-function uniqNorm(arr){
-  const s=new Set(); const out=[];
-  for(const x of arr||[]){ const t=String(x||"").toLowerCase().trim(); if(t && !s.has(t)){ s.add(t); out.push(t); } }
-  return out;
-}
+function currentMonth() { return new Date().toISOString().slice(0, 7); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function stripAccents(s) { return s.normalize("NFD").replace(/[\u0300-\u036f]/g, ""); }
+function uniqNorm(arr) { const s=new Set(); const out=[]; for (const x of arr||[]) { const t=String(x||"").toLowerCase().trim(); if (t && !s.has(t)) { s.add(t); out.push(t); } } return out; }
 
-// ========= DB =========
+/* ==========================
+   DB (lowdb) & Billing
+========================== */
 await ensureDir(path.dirname(DB_PATH));
 const adapter = new JSONFile(DB_PATH);
 const db = new Low(adapter, { runs: [], leads: [] });
 await db.read();
 db.data ||= { runs: [], leads: [] };
 
-// ========= Billing =========
 await ensureDir(path.dirname(BILLING_PATH));
 async function loadBilling() {
-  const text = await fs.readFile(BILLING_PATH, "utf8").catch(()=> null);
+  const text = await fs.readFile(BILLING_PATH, "utf8").catch(() => null);
   if (!text) {
     const fresh = { month: currentMonth(), spent_usd: 0 };
     await fs.writeFile(BILLING_PATH, JSON.stringify(fresh, null, 2));
@@ -70,80 +70,72 @@ async function loadBilling() {
 }
 async function saveBilling(b) { await fs.writeFile(BILLING_PATH, JSON.stringify(b, null, 2)); }
 
-// ========= DataForSEO config =========
+/* ==========================
+   DataForSEO Config
+========================== */
 const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true");
 const DFS_LOGIN = process.env.DFS_LOGIN;
 const DFS_PASSWORD = process.env.DFS_PASSWORD;
-const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX por defecto
+const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX
 const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";
-
-// Expansión y batches
-const ENABLE_DFS_KFK = /^true$/i.test(process.env.ENABLE_DFS_KFK || "false");
+const ENABLE_DFS_KFK = /^true$/i.test(process.env.ENABLE_DFS_KFK || "true");
 const MAX_KEYWORDS_EXPANDED = Math.min(200, Math.max(10, Number(process.env.MAX_KEYWORDS_EXPANDED || 120)));
 const DFS_SV_BATCH_SIZE = Math.min(1000, Math.max(1, Number(process.env.DFS_SV_BATCH_SIZE || 200)));
 const DFS_SLEEP_MS = Math.max(0, Number(process.env.DFS_SLEEP_MS || 650));
 
-// Urgency 2.0 pesos
-const W_PROX  = Number(process.env.URGENCY_W_PROX  || 0.5);
-const W_SEV   = Number(process.env.URGENCY_W_SEV   || 0.3);
-const W_IMP   = Number(process.env.URGENCY_W_IMP   || 0.2);
-const B_NEWS  = Number(process.env.URGENCY_BOOST_NEWS  || 0.15);
-const B_FRESH = Number(process.env.URGENCY_BOOST_FRESH || 0.10);
-const B_PAT   = Number(process.env.URGENCY_BOOST_PATTERN||0.10);
+/* Urgency weights */
+const W_PROX = Number(process.env.URGENCY_W_PROX || 0.5);
+const W_SEV  = Number(process.env.URGENCY_W_SEV  || 0.3);
+const W_IMP  = Number(process.env.URGENCY_W_IMP  || 0.2);
+const B_NEWS = Number(process.env.URGENCY_BOOST_NEWS  || 0.15);
+const B_FRESH= Number(process.env.URGENCY_BOOST_FRESH || 0.10);
+const B_PAT  = Number(process.env.URGENCY_BOOST_PATTERN || 0.10);
 
-// Cluster config
+/* Cluster config */
 const CLUSTER_JACCARD_T = Math.max(0.1, Math.min(0.9, Number(process.env.CLUSTER_JACCARD_T || 0.42)));
 const CLUSTER_MIN_SIZE  = Math.max(1, Number(process.env.CLUSTER_MIN_SIZE || 2));
 
-// ========= Costes =========
+/* Cost units (aprox) */
 const UNIT = { DFS_SV_TASK: 0.075, DFS_SERP_PAGE: 0.002, DFS_KFK_TASK: 0.12, DFS_AUTOCOMPLETE: 0.002 };
 
-// ========= HTTP =========
+/* HTTP */
 const http = axios.create({ timeout: 15000 });
 
-// ========= Fuentes por defecto (si no hay archivo ni ENV) =========
+/* ==========================
+   Signals Sources (bootstrap)
+========================== */
 const DEFAULT_SIGNALS_SOURCES = [
   { url: "https://workspaceupdates.googleblog.com/feeds/posts/default", vertical: "email", region: "LATAM", type: "platform", ttl_days: 365 },
   { url: "https://developer.chrome.com/feeds/blog.xml", vertical: "generic", region: "LATAM", type: "platform", ttl_days: 365 },
   { url: "https://www.pcisecuritystandards.org/pci_security/rss", vertical: "compliance", region: "LATAM", type: "regulatory", ttl_days: 365 },
   { url: "https://shopify.engineering/atom.xml", vertical: "ecommerce", region: "LATAM", type: "platform", ttl_days: 365 }
 ];
-
 let SOURCES_PATH_RESOLVED = null;
 let SOURCES_ORIGIN = null;
 
-// -------- resolver rutas de fuentes + bootstrap --------
 function candidatePaths() {
-  return [
-    process.env.SIGNALS_SOURCES_PATH,
-    "/app/data/signals_sources.json",
-    "/opt/render/project/src/data/signals_sources.json"
-  ].filter(Boolean);
+  return [process.env.SIGNALS_SOURCES_PATH, "/app/data/signals_sources.json", "/opt/render/project/src/data/signals_sources.json"].filter(Boolean);
 }
-async function tryWriteJson(filePath, obj){
+async function tryWriteJson(filePath, obj) {
   try { await ensureDir(path.dirname(filePath)); await fs.writeFile(filePath, JSON.stringify(obj, null, 2), "utf8"); return true; }
   catch { return false; }
 }
 async function bootstrapSources() {
-  // 1) ENV JSON crudo
   if (process.env.SIGNALS_SOURCES_JSON) {
     try {
       const parsed = JSON.parse(process.env.SIGNALS_SOURCES_JSON);
       const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
       if (await tryWriteJson(target, parsed)) { SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "env_json"; return target; }
-    } catch (e) { logger.warn({msg:"Invalid SIGNALS_SOURCES_JSON", err:e.message}); }
+    } catch (e) { logger.warn({ msg: "Invalid SIGNALS_SOURCES_JSON", err: e.message }); }
   }
-  // 2) ENV base64
   if (process.env.SIGNALS_SOURCES_B64) {
     try {
-      const parsed = JSON.parse(Buffer.from(process.env.SIGNALS_SOURCES_B64,"base64").toString("utf8"));
+      const parsed = JSON.parse(Buffer.from(process.env.SIGNALS_SOURCES_B64, "base64").toString("utf8"));
       const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
       if (await tryWriteJson(target, parsed)) { SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "env_b64"; return target; }
-    } catch (e) { logger.warn({msg:"Invalid SIGNALS_SOURCES_B64", err:e.message}); }
+    } catch (e) { logger.warn({ msg: "Invalid SIGNALS_SOURCES_B64", err: e.message }); }
   }
-  // 3) Rutas candidatas
   for (const p of candidatePaths()) { try { if (fscore.existsSync(p)) { SOURCES_PATH_RESOLVED = p; SOURCES_ORIGIN = "file_existing"; return p; } } catch {}
-  // 4) Fallback: crear default
   const fallback = "/app/data/signals_sources.json";
   if (await tryWriteJson(fallback, DEFAULT_SIGNALS_SOURCES)) { SOURCES_PATH_RESOLVED = fallback; SOURCES_ORIGIN = "default_bootstrap"; return fallback; }
   return null;
@@ -151,31 +143,37 @@ async function bootstrapSources() {
 await ensureDir("/app/data");
 await bootstrapSources();
 
-// ========= Health =========
+/* ==========================
+   Health
+========================== */
 app.get("/healthz", async (_req, res) => {
   const billing = await loadBilling();
   res.json({ ok: true, month: billing.month, spent: billing.spent_usd });
 });
 
-// ========= Debug de fuentes =========
+/* Debug de fuentes */
 app.get("/signals/sources/debug", async (_req, res) => {
   const envPath = process.env.SIGNALS_SOURCES_PATH || null;
   const envJson = !!process.env.SIGNALS_SOURCES_JSON;
-  const envB64 = !!process.env.SIGNALS_SOURCES_B64;
+  const envB64  = !!process.env.SIGNALS_SOURCES_B64;
   const candidates = candidatePaths().map(p => {
-    let exists=false,size=null;
-    try { if (fscore.existsSync(p)) { const st=fscore.statSync(p); exists=true; size=st.size; } } catch {}
+    let exists=false, size=null;
+    try { if (fscore.existsSync(p)) { const st = fscore.statSync(p); exists=true; size=st.size; } } catch {}
     return { path:p, exists, size };
   });
   let head = null;
-  if (SOURCES_PATH_RESOLVED) { try { head = (await fs.readFile(SOURCES_PATH_RESOLVED,"utf8")).slice(0,400); } catch {} }
-  res.json({ env:{ SIGNALS_SOURCES_PATH: envPath, has_JSON:envJson, has_B64:envB64, SIGNALS_PATH }, cwd:process.cwd(), candidates, resolved:SOURCES_PATH_RESOLVED, origin:SOURCES_ORIGIN, head_preview: head });
+  if (SOURCES_PATH_RESOLVED) { try { head = (await fs.readFile(SOURCES_PATH_RESOLVED, "utf8")).slice(0, 400); } catch {} }
+  res.json({ env:{ SIGNALS_SOURCES_PATH: envPath, has_JSON: envJson, has_B64: envB64, SIGNALS_PATH }, cwd: process.cwd(), candidates, resolved: SOURCES_PATH_RESOLVED, origin: SOURCES_ORIGIN, head_preview: head });
 });
 
-// ========= Parser XML (única instancia) =========
-const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"" });
+/* ==========================
+   XML Parser (única instancia)
+========================== */
+const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 
-// ========= GEO helpers =========
+/* ==========================
+   GEO helpers
+========================== */
 function resolveGeo(requestedLanguage, requestedRegion) {
   const lang = (requestedLanguage || DFS_LANGUAGE_CODE || "es").toLowerCase();
   let loc = DFS_LOCATION_CODE;
@@ -186,53 +184,53 @@ function resolveGeo(requestedLanguage, requestedRegion) {
   return { lang, loc };
 }
 
-// ========= SERP (features + señales + PAA/Related) =========
+/* ==========================
+   SERP features (PAA/Related)
+========================== */
 async function dfsSerpFeatures(keyword, pages = 1, geo) {
   if (!ENABLE_DATAFORSEO) {
-    return { paid_density: 0.4, serp_features_load: 0.5, volatility: 0.2, cost: 0,
-      serp_signals: { hasNews:false, freshShare:0, paa:[], related:[] } };
+    return { paid_density: 0.4, serp_features_load: 0.5, volatility: 0.2, cost: 0, serp_signals: { hasNews: false, freshShare: 0, paa: [], related: [] } };
   }
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
   const lang = geo?.lang || DFS_LANGUAGE_CODE;
   const loc  = geo?.loc  || DFS_LOCATION_CODE;
-  const payload = [{ keyword, location_code: loc, language_code: lang, depth: pages*10 }];
+  const payload = [{ keyword, location_code: loc, language_code: lang, depth: pages * 10 }];
   try {
     const { data } = await http.post("https://api.dataforseo.com/v3/serp/google/organic/live/advanced", payload, { auth });
     const items = data?.tasks?.[0]?.result?.[0]?.items || [];
-    const ads = items.filter(i=>i.type==="ad").length;
-    const paid_density = Math.min(1, ads/(pages*10));
-    const nonOrganic = items.filter(i=>i.type!=="organic").length;
-    const serp_features_load = Math.min(1, nonOrganic/(pages*10));
+    const ads = items.filter(i => i.type === "ad").length;
+    const paid_density = Math.min(1, ads / (pages*10));
+    const nonOrganic = items.filter(i => i.type !== "organic").length;
+    const serp_features_load = Math.min(1, nonOrganic / (pages*10));
     const now = Date.now(), THRESH=45;
     const hasNews = items.some(i => ["top_stories","news","google_news"].includes(String(i.type||"").toLowerCase()));
     const freshCount = items.filter(i => { const t=i.timestamp||i.published_time||i.datetime; if(!t) return false; const ts=Number(new Date(t)); return Number.isFinite(ts) && (now-ts)<=THRESH*86400000; }).length;
     const freshShare = items.length ? freshCount/items.length : 0;
-    const paa=[], related=[];
+    const paa = [], related = [];
     for (const it of items) {
-      const t=String(it.type||"").toLowerCase();
-      if (t==="people_also_ask" && Array.isArray(it.items)) for (const q of it.items) { const text=q.title||q.question||q.text; if (text) paa.push(String(text).trim()); }
-      if (t==="related_searches" && Array.isArray(it.items)) for (const r of it.items) { const text=r.keyword||r.title||r.text; if (text) related.push(String(text).trim()); }
+      const t = String(it.type||"").toLowerCase();
+      if (t === "people_also_ask" && Array.isArray(it.items)) for (const q of it.items) { const txt=q.title||q.question||q.text; if (txt) paa.push(String(txt).trim()); }
+      if (t === "related_searches" && Array.isArray(it.items)) for (const r of it.items) { const txt=r.keyword||r.title||r.text; if (txt) related.push(String(txt).trim()); }
     }
     return { paid_density, serp_features_load, volatility:0.2, cost:UNIT.DFS_SERP_PAGE*pages, serp_signals:{ hasNews, freshShare:Number(freshShare.toFixed(2)), paa, related } };
   } catch (e) {
-    logger.error({ msg:"DFS SERP error", err:e.message });
-    return { paid_density:0.5, serp_features_load:0.5, volatility:0.2, cost:0, serp_signals:{ hasNews:false, freshShare:0, paa:[], related:[] } };
+    logger.error({ msg: "DFS SERP error", err: e.message });
+    return { paid_density: 0.5, serp_features_load: 0.5, volatility: 0.2, cost: 0, serp_signals: { hasNews: false, freshShare: 0, paa: [], related: [] } };
   }
 }
 
-// ========= KfK (multi-semilla) =========
+/* ==========================
+   KfK (multi-semilla)
+========================== */
 async function dfsKeywordsForKeywords(seeds, geo) {
   if (!ENABLE_DATAFORSEO || !seeds?.length) return { keywords: [], cost: 0 };
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
   const lang = geo?.lang || DFS_LANGUAGE_CODE;
   const loc  = geo?.loc  || DFS_LOCATION_CODE;
-  const seedList = uniqNorm(seeds).slice(0, 10); // hasta 10 semillas
+  const seedList = uniqNorm(seeds).slice(0, 10);
   const payload = [{ location_code: loc, language_code: lang, keywords: seedList }];
   try {
-    const { data } = await http.post(
-      "https://api.dataforseo.com/v3/keywords_data/google_ads/keywords_for_keywords/live",
-      payload, { auth }
-    );
+    const { data } = await http.post("https://api.dataforseo.com/v3/keywords_data/google_ads/keywords_for_keywords/live", payload, { auth });
     const items = data?.tasks?.[0]?.result?.[0]?.items || [];
     const kws = items.map(it => String(it.keyword||"").trim()).filter(Boolean);
     return { keywords: uniqNorm(kws).slice(0, MAX_KEYWORDS_EXPANDED), cost: UNIT.DFS_KFK_TASK };
@@ -242,7 +240,9 @@ async function dfsKeywordsForKeywords(seeds, geo) {
   }
 }
 
-// ========= Autocomplete =========
+/* ==========================
+   Autocomplete
+========================== */
 async function dfsAutocompleteExpand(seeds, geo) {
   if (!seeds?.length) return { keywords: [], cost: 0 };
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
@@ -252,23 +252,20 @@ async function dfsAutocompleteExpand(seeds, geo) {
   for (const s of uniqNorm(seeds).slice(0, 10)) {
     const payload = [{ keyword: s, language_code: lang, location_code: loc }];
     try {
-      const { data } = await http.post(
-        "https://api.dataforseo.com/v3/serp/google/autocomplete/live",
-        payload, { auth }
-      );
+      const { data } = await http.post("https://api.dataforseo.com/v3/serp/google/autocomplete/live", payload, { auth });
       const items = data?.tasks?.[0]?.result?.[0]?.items || [];
       for (const it of items) if (it.suggestion) out.add(String(it.suggestion).trim());
       cost += UNIT.DFS_AUTOCOMPLETE;
-    } catch (e) {
-      logger.warn({ msg:"DFS autocomplete error", err:e.message });
-    }
+    } catch (e) { logger.warn({ msg: "DFS autocomplete error", err: e.message }); }
     await sleep(200);
   }
   return { keywords: Array.from(out), cost };
 }
 
-// ========= Heurística (fallback) =========
-function heuristicExpand(topic){
+/* ==========================
+   Heurística
+========================== */
+function heuristicExpand(topic) {
   const t = (topic||"").toLowerCase(); const arr=[];
   if (t.includes("pci")) arr.push("pci dss v4.0","auditoría pci","certificación pci dss","cumplimiento pci 2025","requisitos pci dss","qsa pci","saq pci dss","controles pci dss","normativa pci pagos","pci dss checklist 2025","procesadores pagos pci","servicio consultoría pci");
   else if (t.includes("shopify")) arr.push("shopify checkout extensibility","migración checkout shopify","plantillas checkout shopify","apps checkout shopify","custom checkout shopify","checkout extensibility migration","checkout ui extensions","checkout editor","shopify functions checkout");
@@ -276,38 +273,31 @@ function heuristicExpand(topic){
   return arr;
 }
 
-// ========= Sanitizador de keywords =========
+/* ==========================
+   Sanitizador & SV por bloques
+========================== */
 function sanitizeKeywords(keywords) {
-  const MAX_LEN = 80;
-  const BAD_CHARS = /[?¿“”"<>#%{}|\\^~\[\]]/g;
-  const cleaned=[], rejected=[];
-  for (let kw of keywords || []) {
-    if (!kw) continue;
-    let k = String(kw).normalize("NFKC").replace(BAD_CHARS," ").replace(/\s+/g," ").trim();
-    if (k.length > MAX_LEN) k = k.slice(0, MAX_LEN).trim();
-    if (!k || k.length < 2) { rejected.push(kw); continue; }
-    cleaned.push(k);
+  const MAX_LEN = 80; const BAD_CHARS = /[?¿“”"<>#%{}|\\^~\[\]]/g;
+  const cleaned=[], rejected=[]; for (let kw of keywords||[]) {
+    if (!kw) continue; let k=String(kw).normalize("NFKC").replace(BAD_CHARS," ").replace(/\s+/g," ").trim();
+    if (k.length>MAX_LEN) k=k.slice(0,MAX_LEN).trim(); if (!k || k.length<2) { rejected.push(kw); continue; } cleaned.push(k);
   }
   return { cleaned: uniqNorm(cleaned), rejected };
 }
-
-// ========= Search Volume por bloques (con per-keyword) =========
-async function dfsSearchVolumeChunks(keywords, geo){
+async function dfsSearchVolumeChunks(keywords, geo) {
   if (!ENABLE_DATAFORSEO) return { cost:0, total_sv:15000, avg_cpc:1.1, trend:0.12, transactional_share:0.6, items:[] };
-
   const { cleaned, rejected } = sanitizeKeywords(keywords);
-  if (rejected.length) logger.warn({ msg: "SV batch: rejected invalid keywords", count: rejected.length, examples: rejected.slice(0,5) });
-  const safeKeywords = cleaned.length ? cleaned : [];
-  if (!safeKeywords.length) return { cost:0, total_sv:0, avg_cpc:0, trend:0, transactional_share:0, items:[] };
+  if (rejected.length) logger.warn({ msg:"SV batch rejected", count: rejected.length, examples: rejected.slice(0,5) });
+  const safe = cleaned.length ? cleaned : [];
+  if (!safe.length) return { cost:0, total_sv:0, avg_cpc:0, trend:0, transactional_share:0, items:[] };
 
-  const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
+  const auth={ username: DFS_LOGIN, password: DFS_PASSWORD };
   const lang = geo?.lang || DFS_LANGUAGE_CODE;
   const loc  = geo?.loc  || DFS_LOCATION_CODE;
-
-  const chunks=[]; for (let i=0;i<safeKeywords.length;i+=DFS_SV_BATCH_SIZE) chunks.push(safeKeywords.slice(i,i+DFS_SV_BATCH_SIZE));
+  const chunks=[]; for (let i=0;i<safe.length;i+=DFS_SV_BATCH_SIZE) chunks.push(safe.slice(i,i+DFS_SV_BATCH_SIZE));
 
   let total_sv=0, w_cpc=0, transCount=0, tasksCost=0; const months=new Map(); const perKw=[];
-  const isTransactional=(kw,cpc,comp)=>{ const k=(kw||"").toLowerCase(); const patterns=["precio","coste","comprar","proveedor","consultor","consultoría","auditor","servicio","software","herramienta","migración","implementación","mejor","oferta","tarifa","planes","apps","plugin","tool","extension","extensions"]; return patterns.some(p=>k.includes(p)) || (cpc>=0.5) || (comp>=0.5); };
+  const isTrans=(kw,cpc,comp)=>{ const k=(kw||"").toLowerCase(); const pats=["precio","coste","comprar","proveedor","consultor","consultoría","auditor","servicio","software","herramienta","migración","implementación","oferta","tarifa","planes","apps","plugin","tool","extension","extensions"]; return pats.some(p=>k.includes(p)) || cpc>=0.5 || comp>=0.5; };
 
   for (let c=0;c<chunks.length;c++){
     const payload=[{ location_code:loc, language_code:lang, keywords:chunks[c] }];
@@ -315,34 +305,27 @@ async function dfsSearchVolumeChunks(keywords, geo){
       const { data } = await http.post("https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live", payload, { auth });
       const items = data?.tasks?.[0]?.result?.[0]?.items || [];
       for (const it of items) {
-        const kw=String(it.keyword||"");
-        const sv=Number(it.search_volume||0);
-        const cpc=Number((it.cpc&&it.cpc[0]?.value)||0);
-        const comp=Number(it.competition||0);
-        const trans=isTransactional(kw,cpc,comp);
-        total_sv+=sv; w_cpc+=cpc*sv; if (trans) transCount++;
-        perKw.push({ keyword:kw, sv, cpc, comp, transactional: trans });
-
-        const ms=it.monthly_searches||it.search_volume_by_month||[];
-        for (const m of ms) { const y=m.year||m.month?.split("-")?.[0]; const mon=m.month||(m.month_num&&String(m.month_num).padStart(2,"0")); const key=(y&&mon)?`${y}-${mon}`:null; const v=Number(m.search_volume||m.value||0); if (key) months.set(key,(months.get(key)||0)+v); }
+        const kw=String(it.keyword||""); const sv=Number(it.search_volume||0);
+        const cpc=Number((it.cpc && it.cpc[0]?.value) || 0); const comp=Number(it.competition||0);
+        const trans=isTrans(kw,cpc,comp); total_sv+=sv; w_cpc+=cpc*sv; if (trans) transCount++; perKw.push({ keyword:kw, sv, cpc, comp, transactional:trans });
+        const ms=it.monthly_searches||it.search_volume_by_month||[]; for (const m of ms){ const y=m.year||m.month?.split("-")?.[0]; const mon=m.month||(m.month_num&&String(m.month_num).padStart(2,"0")); const key=(y&&mon)?`${y}-${mon}`:null; const v=Number(m.search_volume||m.value||0); if (key) months.set(key,(months.get(key)||0)+v); }
       }
-      tasksCost+=UNIT.DFS_SV_TASK;
-    } catch(e){ logger.error({ msg:"DFS SV chunk error", err:e.message }); }
+      tasksCost += UNIT.DFS_SV_TASK;
+    } catch(e){ logger.error({ msg:"DFS SV error", err:e.message }); }
     if (c<chunks.length-1 && DFS_SLEEP_MS>0) await sleep(DFS_SLEEP_MS);
   }
-
   const avg_cpc = total_sv ? (w_cpc/total_sv) : 0;
   const sorted=Array.from(months.keys()).sort(); const last12=sorted.slice(-12); const vals=last12.map(k=>months.get(k)||0);
   const prev6=vals.slice(0,6).reduce((a,b)=>a+b,0), last6=vals.slice(-6).reduce((a,b)=>a+b,0);
   const trend = prev6>0 ? (last6-prev6)/prev6 : 0;
   const transactional_share = (perKw.length||1) ? (perKw.filter(x=>x.transactional).length/Math.max(1,perKw.length)) : 0;
-
   return { cost:tasksCost, total_sv, avg_cpc, trend, transactional_share, items: perKw };
 }
 
-// ========= Demand & Urgency =========
-function mapVertical(topic){
-  const t = String(topic||"").toLowerCase();
+/* ==========================
+   Demand & Urgency
+========================== */
+function mapVertical(topic){ const t=String(topic||"").toLowerCase();
   if (t.includes("whatsapp")) return "whatsapp";
   if (t.includes("gmail") || t.includes("yahoo") || t.includes("entregabilidad") || t.includes("email")) return "email";
   if (t.includes("shopify") || t.includes("checkout")) return "ecommerce";
@@ -377,270 +360,130 @@ function computeDemandIndex(batch){
   return Number(demandIdx.toFixed(2));
 }
 
-// ========= STOPWORDS & tokenización para clustering =========
+/* ==========================
+   Clustering (Jaccard)
+========================== */
 const STOP_ES = new Set(["de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","no","una","su","al","lo","como","más","pero","sus","le","ya","o","este","sí","porque","esta","entre","cuando","muy","sin","sobre","también","me","hasta","hay","donde","quien","desde"]);
 const STOP_EN = new Set(["the","of","to","and","a","in","is","it","you","that","for","on","with","as","are","this","be","or","by","from","at","an","have","has","how","what","why","which"]);
-function tokenizeKw(kw){
-  const s = stripAccents(String(kw||"").toLowerCase());
-  return s.split(/[^a-z0-9+]+/i).map(t=>t.trim()).filter(t=>t && !STOP_ES.has(t) && !STOP_EN.has(t));
-}
-function jaccard(aSet, bSet){
-  const a = new Set(aSet), b = new Set(bSet);
-  const interSize = [...a].filter(x=>b.has(x)).length;
-  const unionSize  = new Set([...a, ...b]).size || 1;
-  return interSize/unionSize;
-}
-
-// ========= Clustering de keywords =========
+function tokenizeKw(kw){ const s = stripAccents(String(kw||"").toLowerCase()); return s.split(/[^a-z0-9+]+/i).map(t=>t.trim()).filter(t=>t && !STOP_ES.has(t) && !STOP_EN.has(t)); }
+function jaccard(aSet,bSet){ const a=new Set(aSet), b=new Set(bSet); const inter=[...a].filter(x=>b.has(x)).length; const uni=new Set([...a,...b]).size||1; return inter/uni; }
 function clusterKeywords(perKwItems){
-  // perKwItems: [{keyword, sv, cpc, comp, transactional}]
-  const entries = (perKwItems||[]).map(it => {
-    const tokens = tokenizeKw(it.keyword);
-    return { ...it, tokens };
-  }).filter(e=>e.tokens.length);
-
-  const clusters = []; // { id, tokensCentroid:Set, keywords:[{keyword,...}], sum_sv, sum_cpc_w, trans_count }
-  let idSeq=1;
+  const entries=(perKwItems||[]).map(it=>({ ...it, tokens: tokenizeKw(it.keyword) })).filter(e=>e.tokens.length);
+  const clusters=[]; let idSeq=1;
   for (const e of entries){
     let bestIdx=-1, bestSim=0;
-    for (let i=0;i<clusters.length;i++){
-      const sim = jaccard(clusters[i].tokensCentroid, e.tokens);
-      if (sim>bestSim){ bestSim=sim; bestIdx=i; }
-    }
+    for (let i=0;i<clusters.length;i++){ const sim=jaccard(clusters[i].tokensCentroid,e.tokens); if (sim>bestSim){ bestSim=sim; bestIdx=i; } }
     if (bestSim>=CLUSTER_JACCARD_T){
-      const cl=clusters[bestIdx];
-      cl.keywords.push(e);
-      cl.sum_sv += e.sv;
-      cl.sum_cpc_w += e.cpc*e.sv;
-      cl.trans_count += e.transactional?1:0;
-      // actualiza centroid como unión simple
-      cl.tokensCentroid = new Set([...cl.tokensCentroid, ...e.tokens]);
+      const cl=clusters[bestIdx]; cl.keywords.push(e); cl.sum_sv+=e.sv; cl.sum_cpc_w+=e.cpc*e.sv; cl.trans_count+=e.transactional?1:0; cl.tokensCentroid=new Set([...cl.tokensCentroid,...e.tokens]);
     } else {
-      clusters.push({
-        id: `c${idSeq++}`,
-        tokensCentroid: new Set(e.tokens),
-        keywords: [e],
-        sum_sv: e.sv,
-        sum_cpc_w: e.cpc*e.sv,
-        trans_count: e.transactional?1:0
-      });
+      clusters.push({ id:`c${idSeq++}`, tokensCentroid:new Set(e.tokens), keywords:[e], sum_sv:e.sv, sum_cpc_w:e.cpc*e.sv, trans_count:e.transactional?1:0 });
     }
   }
-
-  // Post-procesado: etiquetas y métricas
-  const enriched = clusters
-    .map(cl => {
-      const total = cl.keywords.length;
-      const avg_cpc = cl.sum_sv ? cl.sum_cpc_w / cl.sum_sv : 0;
-      const transactional_ratio = total ? cl.trans_count/total : 0;
-      // etiqueta: top 3 tokens más frecuentes por longitud/presencia
-      const tokenFreq = new Map();
-      for (const e of cl.keywords) for (const t of e.tokens) tokenFreq.set(t,(tokenFreq.get(t)||0)+1);
-      const head = [...tokenFreq.entries()].sort((a,b)=> b[1]-a[1] || b[0].length-a[0].length).slice(0,3).map(x=>x[0]);
-      const label = head.join(" ");
-      return {
-        id: cl.id,
-        label,
-        total_sv: cl.sum_sv,
-        avg_cpc: Number(avg_cpc.toFixed(2)),
-        transactional_ratio: Number(transactional_ratio.toFixed(2)),
-        size: total,
-        sample_queries: cl.keywords.slice(0,5).map(k=>k.keyword),
-        head_terms: head,
-        keywords: cl.keywords
-      };
-    })
-    .filter(cl => cl.size >= CLUSTER_MIN_SIZE || cl.total_sv>0)
-    .sort((a,b)=> (b.total_sv - a.total_sv) || (b.size - a.size));
-
+  const enriched=clusters.map(cl=>{
+    const total=cl.keywords.length; const avg_cpc=cl.sum_sv?cl.sum_cpc_w/cl.sum_sv:0; const tRatio=total?cl.trans_count/total:0;
+    const tf=new Map(); for (const e of cl.keywords) for (const t of e.tokens) tf.set(t,(tf.get(t)||0)+1);
+    const head=[...tf.entries()].sort((a,b)=>b[1]-a[1] || b[0].length-a[0].length).slice(0,3).map(x=>x[0]);
+    return { id:cl.id, label: head.join(" "), total_sv:cl.sum_sv, avg_cpc:Number(avg_cpc.toFixed(2)), transactional_ratio:Number(tRatio.toFixed(2)), size:total, sample_queries: cl.keywords.slice(0,5).map(k=>k.keyword), head_terms: head, keywords: cl.keywords };
+  }).filter(cl=> cl.size>=CLUSTER_MIN_SIZE || cl.total_sv>0).sort((a,b)=> (b.total_sv-a.total_sv) || (b.size-a.size));
   return enriched;
 }
 
-// ========= SCORE RUN =========
-const ScoreRunSchema = z.object({
-  topic: z.string().min(3).max(160),
-  region: z.string().min(2).max(24).default("LATAM"),
-  language: z.string().min(2).max(7).default("es")
-});
-
+/* ==========================
+   SCORE RUN
+========================== */
+const ScoreRunSchema = z.object({ topic: z.string().min(3).max(160), region: z.string().min(2).max(24).default("LATAM"), language: z.string().min(2).max(7).default("es") });
 let cachedSignals = null;
-async function getSignals(){
-  if (cachedSignals) return cachedSignals;
-  await ensureDir(path.dirname(SIGNALS_PATH));
-  try { cachedSignals = JSON.parse(await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]")); }
-  catch { cachedSignals = []; }
-  return cachedSignals;
-}
+async function getSignals(){ if (cachedSignals) return cachedSignals; await ensureDir(path.dirname(SIGNALS_PATH)); try { cachedSignals = JSON.parse(await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]")); } catch { cachedSignals=[]; } return cachedSignals; }
 
 app.post("/score/run", async (req, res) => {
   const parsed = ScoreRunSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error:"invalid_input", details: parsed.error.issues });
-  const { topic, region, language } = parsed.data;
-  const geo = resolveGeo(language, region);
-
+  const { topic, region, language } = parsed.data; const geo = resolveGeo(language, region);
   try {
-    // 1) SERP features + semillas de SERP
     const serp = await dfsSerpFeatures(topic, 1, geo);
-    const fromSerp = []
-      .concat(serp.serp_signals?.paa || [])
-      .concat(serp.serp_signals?.related || []);
-
-    // 2) Heurística
+    const fromSerp = [].concat(serp.serp_signals?.paa||[]).concat(serp.serp_signals?.related||[]);
     const heur = heuristicExpand(topic);
-
-    // 3) KfK multi-semilla y 4) Autocomplete
     const baseSeeds = uniqNorm([topic, ...heur, ...fromSerp]);
     const kfk  = await dfsKeywordsForKeywords(baseSeeds, geo);
     const auto = await dfsAutocompleteExpand([topic, ...heur], geo);
-
-    // 5) Set final y volumen
     const kwSet = uniqNorm([topic, ...fromSerp, ...(kfk.keywords||[]), ...(auto.keywords||[]), ...heur]).slice(0, MAX_KEYWORDS_EXPANDED);
     const svAgg = await dfsSearchVolumeChunks(kwSet, geo);
-
-    // 6) Clustering
     const clusters = clusterKeywords(svAgg.items);
-
-    // 7) Urgencia y scores
     const signals = await getSignals();
     const U = computeUrgency(topic, region, serp.serp_signals, signals);
     const DemandIdx = computeDemandIndex(svAgg);
     const CompIdx = Math.max(0, Math.min(1, 1 - (0.55 + serp.paid_density + serp.serp_features_load)/2.5 + 0.2*serp.volatility ));
-    const PlatFit=0.7, Oper=0.8;
-    const TtC = U>=0.6 ? 14 : 24;
-    const GP = 18320;
-    const ProfitIdx = Math.max(0, Math.min(1, GP/20000));
-    const gTtC = Math.max(0, Math.min(1, (30 - TtC)/20));
+    const PlatFit=0.7, Oper=0.8; const TtC = U>=0.6 ? 14 : 24; const GP = 18320; const ProfitIdx=Math.max(0,Math.min(1,GP/20000)); const gTtC=Math.max(0,Math.min(1,(30-TtC)/20));
     const score = 25*U + 15*gTtC + 15*ProfitIdx + 15*DemandIdx + 15*CompIdx + 10*PlatFit + 5*Oper;
     const decision = (score>=70 && U>=0.6 && TtC<=21) ? "GO" : (score>=60 ? "CONDITIONAL" : "NO-GO");
-
-    // 8) Billing
-    const bill = await loadBilling();
-    bill.spent_usd += (serp.cost||0) + (svAgg.cost||0) + (kfk.cost||0) + (auto.cost||0);
-    if (bill.month !== currentMonth()) { bill.month = currentMonth(); bill.spent_usd = 0; }
-    await saveBilling(bill);
-
-    // 9) Respuesta
+    const bill = await loadBilling(); bill.spent_usd += (serp.cost||0) + (svAgg.cost||0) + (kfk.cost||0) + (auto.cost||0); if (bill.month!==currentMonth()) { bill.month=currentMonth(); bill.spent_usd=0; } await saveBilling(bill);
     res.json({
       topic, region, language,
-      scores:{
-        total:Number(score.toFixed(2)),
-        urgency:Number(U.toFixed(2)),
-        ttc_days:TtC,
-        profit30d:GP,
-        demand:DemandIdx,
-        competition:Number(CompIdx.toFixed(2)),
-        platform_fit:Number(PlatFit.toFixed(2)),
-        operability:Number(Oper.toFixed(2))
-      },
+      scores:{ total:Number(score.toFixed(2)), urgency:Number(U.toFixed(2)), ttc_days:TtC, profit30d:GP, demand:DemandIdx, competition:Number(CompIdx.toFixed(2)), platform_fit:Number(PlatFit.toFixed(2)), operability:Number(Oper.toFixed(2)) },
       decision,
-      cost:{
-        run_usd:Number(((serp.cost||0)+(svAgg.cost||0)+(kfk.cost||0)+(auto.cost||0)).toFixed(3)),
-        month_spent_usd: bill.spent_usd
-      },
-      demand_meta:{
-        keywords_used: kwSet.length,
-        total_sv: svAgg.total_sv,
-        avg_cpc:Number(svAgg.avg_cpc.toFixed(2)),
-        trend_12m:Number(svAgg.trend.toFixed(2)),
-        transactional_share:Number(svAgg.transactional_share.toFixed(2)),
-        clusters_count: clusters.length
-      },
+      cost:{ run_usd:Number(((serp.cost||0)+(svAgg.cost||0)+(kfk.cost||0)+(auto.cost||0)).toFixed(3)), month_spent_usd: bill.spent_usd },
+      demand_meta:{ keywords_used: kwSet.length, total_sv: svAgg.total_sv, avg_cpc:Number(svAgg.avg_cpc.toFixed(2)), trend_12m:Number(svAgg.trend.toFixed(2)), transactional_share:Number(svAgg.transactional_share.toFixed(2)), clusters_count: clusters.length },
       serp_meta: serp.serp_signals,
-      clusters_top: clusters.slice(0,10).map(c => ({
-        id:c.id, label:c.label, total_sv:c.total_sv, avg_cpc:c.avg_cpc,
-        transactional_ratio:c.transactional_ratio, size:c.size, sample_queries:c.sample_queries
-      }))
+      clusters_top: clusters.slice(0,10).map(c => ({ id:c.id, label:c.label, total_sv:c.total_sv, avg_cpc:c.avg_cpc, transactional_ratio:c.transactional_ratio, size:c.size, sample_queries:c.sample_queries }))
     });
-  } catch (e) {
-    logger.error(e);
-    res.status(500).json({ error:"internal_error", detail:e.message });
-  }
+  } catch (e) { logger.error(e); res.status(500).json({ error:"internal_error", detail:e.message }); }
 });
 
-// ========= Endpoint dedicado: /keywords/cluster =========
-const ClusterRunSchema = z.object({
-  topic: z.string().min(3).max(160),
-  region: z.string().min(2).max(24).default("LATAM"),
-  language: z.string().min(2).max(7).default("es")
-});
+/* ==========================
+   Endpoint /keywords/cluster
+========================== */
+const ClusterRunSchema = z.object({ topic: z.string().min(3).max(160), region: z.string().min(2).max(24).default("LATAM"), language: z.string().min(2).max(7).default("es") });
 app.post("/keywords/cluster", async (req,res)=>{
   const parsed = ClusterRunSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error:"invalid_input", details: parsed.error.issues });
-  const { topic, region, language } = parsed.data;
-  const geo = resolveGeo(language, region);
+  const { topic, region, language } = parsed.data; const geo = resolveGeo(language, region);
   try{
     const serp = await dfsSerpFeatures(topic, 1, geo);
-    const fromSerp = []
-      .concat(serp.serp_signals?.paa || [])
-      .concat(serp.serp_signals?.related || []);
+    const fromSerp = [].concat(serp.serp_signals?.paa||[]).concat(serp.serp_signals?.related||[]);
     const heur = heuristicExpand(topic);
     const kfk  = await dfsKeywordsForKeywords(uniqNorm([topic, ...fromSerp, ...heur]), geo);
     const auto = await dfsAutocompleteExpand([topic, ...heur], geo);
     const kwSet = uniqNorm([topic, ...fromSerp, ...(kfk.keywords||[]), ...(auto.keywords||[]), ...heur]).slice(0, MAX_KEYWORDS_EXPANDED);
     const svAgg = await dfsSearchVolumeChunks(kwSet, geo);
     const clusters = clusterKeywords(svAgg.items);
-    const bill = await loadBilling();
-    bill.spent_usd += (serp.cost||0) + (svAgg.cost||0) + (kfk.cost||0) + (auto.cost||0);
-    await saveBilling(bill);
-    res.json({
-      topic, region, language,
-      counts:{ keywords: kwSet.length, clusters: clusters.length },
-      totals:{ sv: svAgg.total_sv, avg_cpc:Number(svAgg.avg_cpc.toFixed(2)) },
-      clusters,
-      cost:{ run_usd:Number(((serp.cost||0)+(svAgg.cost||0)+(kfk.cost||0)+(auto.cost||0)).toFixed(3)), month_spent_usd: bill.spent_usd }
-    });
-  }catch(e){
-    logger.error(e); res.status(500).json({ error:"internal_error", detail:e.message });
-  }
+    const bill = await loadBilling(); bill.spent_usd += (serp.cost||0) + (svAgg.cost||0) + (kfk.cost||0) + (auto.cost||0); await saveBilling(bill);
+    res.json({ topic, region, language, counts:{ keywords: kwSet.length, clusters: clusters.length }, totals:{ sv: svAgg.total_sv, avg_cpc:Number(svAgg.avg_cpc.toFixed(2)) }, clusters, cost:{ run_usd:Number(((serp.cost||0)+(svAgg.cost||0)+(kfk.cost||0)+(auto.cost||0)).toFixed(3)), month_spent_usd: bill.spent_usd } });
+  }catch(e){ logger.error(e); res.status(500).json({ error:"internal_error", detail:e.message }); }
 });
 
-// ========= SIGNALS PRO =========
+/* ==========================
+   SIGNALS PRO
+========================== */
+app.post("/signals/upsert", async (req,res)=>{ try{
+  const now=new Date().toISOString(); await ensureDir(path.dirname(SIGNALS_PATH));
+  const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); const arr=JSON.parse(raw);
+  const obj={...req.body}; obj.id=obj.id||`sig_${Date.now()}`; obj.updated_at=now;
+  const idx=arr.findIndex(s=>s.id===obj.id); if (idx>=0) arr[idx]={...arr[idx],...obj}; else arr.push(obj);
+  await fs.writeFile(SIGNALS_PATH,JSON.stringify(arr,null,2)); cachedSignals=null; res.json({ok:true,id:obj.id,total:arr.length});
+}catch(e){ res.status(500).json({ok:false,error:e.message}); }});
 
-// Upsert señal procesada
-app.post("/signals/upsert", async (req,res)=>{
-  try{
-    const now=new Date().toISOString(); await ensureDir(path.dirname(SIGNALS_PATH));
-    const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); const arr=JSON.parse(raw);
-    const obj={...req.body}; obj.id=obj.id||`sig_${Date.now()}`; obj.updated_at=now;
-    const idx=arr.findIndex(s=>s.id===obj.id); if (idx>=0) arr[idx]={...arr[idx],...obj}; else arr.push(obj);
-    await fs.writeFile(SIGNALS_PATH,JSON.stringify(arr,null,2)); cachedSignals=null; res.json({ok:true,id:obj.id,total:arr.length});
-  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
-});
+app.get("/signals/list", async (req,res)=>{ try{
+  const {region,vertical,activeOnly}=req.query; const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); let arr=JSON.parse(raw);
+  if (activeOnly==="true"){ const now=Date.now(); arr=arr.filter(s=>{ const ttl=Number(s.ttl_days||0); if(!ttl) return true; const base=new Date(s.updated_at||s.deadline||Date.now()).getTime(); return (now-base)<= (ttl*86400000); }); }
+  const filtered=arr.filter(s => (!region||s.region===region) && (!vertical||s.vertical===vertical));
+  res.json({ok:true,total:filtered.length,signals:filtered});
+}catch(e){ res.status(500).json({ok:false,error:e.message}); }});
 
-// List
-app.get("/signals/list", async (req,res)=>{
-  try{
-    const {region,vertical,activeOnly}=req.query;
-    const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); let arr=JSON.parse(raw);
-    if (activeOnly==="true"){ const now=Date.now();
-      arr=arr.filter(s=>{ const ttl=Number(s.ttl_days||0); if(!ttl) return true; const base=new Date(s.updated_at||s.deadline||Date.now()).getTime(); return (now-base)<= (ttl*86400000); });
-    }
-    const filtered=arr.filter(s => (!region||s.region===region) && (!vertical||s.vertical===vertical));
-    res.json({ok:true,total:filtered.length,signals:filtered});
-  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
-});
+app.delete("/signals/delete", async (req,res)=>{ try{
+  const {id}=req.query; if(!id) return res.status(400).json({ok:false,error:"id required"});
+  const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); let arr=JSON.parse(raw); const before=arr.length;
+  arr=arr.filter(s=>s.id!==id); await fs.writeFile(SIGNALS_PATH,JSON.stringify(arr,null,2)); cachedSignals=null; res.json({ok:true,removed:before-arr.length});
+}catch(e){ res.status(500).json({ok:false,error:e.message}); }});
 
-// Delete
-app.delete("/signals/delete", async (req,res)=>{
-  try{ const {id}=req.query; if(!id) return res.status(400).json({ok:false,error:"id required"});
-    const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); let arr=JSON.parse(raw); const before=arr.length;
-    arr=arr.filter(s=>s.id!==id); await fs.writeFile(SIGNALS_PATH,JSON.stringify(arr,null,2)); cachedSignals=null; res.json({ok:true,removed:before-arr.length});
-  }catch(e){ res.status(500).json({ok:false,error:e.message}); }
-});
+app.post("/signals/sources/put", async (req,res)=>{ try{
+  const body=req.body; const sources = Array.isArray(body)? body : (Array.isArray(body?.sources)? body.sources : null);
+  if (!sources) return res.status(400).json({ ok:false, error:"Provide array or {sources:[...]}"} );
+  const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
+  await ensureDir(path.dirname(target)); await fs.writeFile(target, JSON.stringify(sources,null,2), "utf8");
+  SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "put_endpoint";
+  res.json({ ok:true, path: target, count: sources.length });
+}catch(e){ res.status(500).json({ ok:false, error:e.message }); }});
 
-// Sources put (subir fuentes manualmente)
-app.post("/signals/sources/put", async (req,res)=>{
-  try{
-    const body=req.body; const sources = Array.isArray(body)? body : (Array.isArray(body?.sources)? body.sources : null);
-    if (!sources) return res.status(400).json({ ok:false, error:"Provide array or {sources:[...]}" });
-    const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
-    await ensureDir(path.dirname(target)); await fs.writeFile(target, JSON.stringify(sources,null,2), "utf8");
-    SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "put_endpoint";
-    res.json({ ok:true, path: target, count: sources.length });
-  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
-});
-
-// Auto-refresh (RSS/Atom)
 function guessVertical(title){ const t=(title||"").toLowerCase();
   if (t.includes("pci")) return "compliance";
   if (t.includes("nis2") || t.includes("data act")) return "compliance";
@@ -652,63 +495,61 @@ function guessVertical(title){ const t=(title||"").toLowerCase();
 function guessRegionFromUrl(url){ if (!url) return process.env.SIGNALS_REGION_DEFAULT || "LATAM"; if (url.includes("europa.eu")) return "EU"; return process.env.SIGNALS_REGION_DEFAULT || "LATAM"; }
 function severityFromText(title){ const t=(title||"").toLowerCase(); if (t.includes("mandatory")||t.includes("obligatorio")||t.includes("deadline")) return 5; if (t.includes("required")||t.includes("requisitos")) return 4; return 3; }
 
-app.post("/signals/auto/refresh", async (_req,res)=>{
-  try{
-    if (!SOURCES_PATH_RESOLVED) await bootstrapSources();
-    const srcPath = SOURCES_PATH_RESOLVED;
-    if (!srcPath || !fscore.existsSync(srcPath)) return res.json({ ok:true, added:0, total:0, note:"signals_sources.json not found (post-bootstrap)" });
+app.post("/signals/auto/refresh", async (_req,res)=>{ try{
+  if (!SOURCES_PATH_RESOLVED) await bootstrapSources();
+  const srcPath = SOURCES_PATH_RESOLVED;
+  if (!srcPath || !fscore.existsSync(srcPath)) return res.json({ ok:true, added:0, total:0, note:"signals_sources.json not found (post-bootstrap)" });
 
-    let sources=[]; try {
-      const txt = await fs.readFile(srcPath,"utf8");
-      const parsed = JSON.parse(txt);
-      sources = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.sources) ? parsed.sources : []);
-    } catch(e){ return res.status(400).json({ ok:false, error:"invalid_sources_json", detail:e.message }); }
+  let sources=[]; try {
+    const txt = await fs.readFile(srcPath,"utf8");
+    const parsed = JSON.parse(txt);
+    sources = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.sources) ? parsed.sources : []);
+  } catch(e){ return res.status(400).json({ ok:false, error:"invalid_sources_json", detail:e.message }); }
 
-    const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); const arr=JSON.parse(raw);
-    let added=0;
-    for (const s of sources) {
-      if (!s?.url) continue;
-      try {
-        const { data } = await axios.get(s.url, { timeout: 15000 });
-        const xml = parser.parse(data);
-        let items=[];
-        if (xml?.rss?.channel?.item) items=xml.rss.channel.item;
-        else if (xml?.feed?.entry) items=xml.feed.entry;
-        else if (Array.isArray(xml?.rss?.item)) items=xml.rss.item;
-        else if (Array.isArray(xml?.entry)) items=xml.entry;
-        if (!Array.isArray(items)) items=[items].filter(Boolean);
-        if (!items.length) { logger.warn({msg:"no items found", source:s.url}); continue; }
+  const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); const arr=JSON.parse(raw);
+  let added=0;
+  for (const s of sources) {
+    if (!s?.url) continue;
+    try {
+      const { data } = await axios.get(s.url, { timeout: 15000 });
+      const xml = parser.parse(data);
+      let items=[];
+      if (xml?.rss?.channel?.item) items=xml.rss.channel.item;
+      else if (xml?.feed?.entry) items=xml.feed.entry;
+      else if (Array.isArray(xml?.rss?.item)) items=xml.rss.item;
+      else if (Array.isArray(xml?.entry)) items=xml.entry;
+      if (!Array.isArray(items)) items=[items].filter(Boolean);
+      if (!items.length) { logger.warn({msg:"no items found", source:s.url}); continue; }
+      for (const it of items) {
+        const title = it.title?.["#text"] || it.title || it.name || "";
+        const link = it.link?.href || it.link || it.guid || "";
+        const vertical = s.vertical || guessVertical(title);
+        const region = s.region || guessRegionFromUrl(String(link));
+        const sev = s.severity || severityFromText(title);
+        const imp = s.impact || 3.0;
+        const yearMatch = String(title).match(/\b(202[4-9])\b/);
+        const deadline = yearMatch ? `${yearMatch[1]}-12-31` : new Date(Date.now()+90*86400000).toISOString().slice(0,10);
+        const id=`auto_${Buffer.from((title+link)).toString("base64").slice(0,12)}`;
+        const idx=arr.findIndex(x=>x.id===id);
+        const obj={ id, vertical, region, type:s.type||"platform", title, severity:sev, impact:imp, deadline, source_url:link, ttl_days:s.ttl_days||365, updated_at:new Date().toISOString() };
+        if (idx>=0) arr[idx]={...arr[idx],...obj}; else { arr.push(obj); added++; }
+      }
+    } catch(e){ logger.warn({ msg:"signals source error", url:s.url, err:e.message }); }
+  }
+  await ensureDir(path.dirname(SIGNALS_PATH));
+  await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr,null,2));
+  res.json({ ok:true, added, total: arr.length, used_path: srcPath, origin: SOURCES_ORIGIN });
+}catch(e){ res.status(500).json({ ok:false, error:e.message }); }});
 
-        for (const it of items) {
-          const title = it.title?.["#text"] || it.title || it.name || "";
-          const link = it.link?.href || it.link || it.guid || "";
-          const vertical = s.vertical || guessVertical(title);
-          const region = s.region || guessRegionFromUrl(String(link));
-          const sev = s.severity || severityFromText(title);
-          const imp = s.impact || 3.0;
-          const yearMatch = String(title).match(/\b(202[4-9])\b/);
-          const deadline = yearMatch ? `${yearMatch[1]}-12-31` : new Date(Date.now()+90*86400000).toISOString().slice(0,10);
-          const id=`auto_${Buffer.from((title+link)).toString("base64").slice(0,12)}`;
-          const idx=arr.findIndex(x=>x.id===id);
-          const obj={ id, vertical, region, type:s.type||"platform", title, severity:sev, impact:imp, deadline, source_url:link, ttl_days:s.ttl_days||365, updated_at:new Date().toISOString() };
-          if (idx>=0) arr[idx]={...arr[idx],...obj}; else { arr.push(obj); added++; }
-        }
-      } catch(e){ logger.warn({ msg:"signals source error", url:s.url, err:e.message }); }
-    }
-    await ensureDir(path.dirname(SIGNALS_PATH));
-    await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr,null,2));
-    res.json({ ok:true, added, total: arr.length, used_path: srcPath, origin: SOURCES_ORIGIN });
-  }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
-});
-
-// ========= Leads & Captación =========
+/* ==========================
+   Leads & Captación
+========================== */
 app.post("/leads/collect", async (req,res)=>{ try{ const lead={...req.body, ts:new Date().toISOString()}; db.data.leads.push(lead); await db.write(); res.json({ok:true}); }catch(e){ res.status(500).json({ok:false,error:e.message}); }});
 app.get("/leads/export", async (_req,res)=>{ try{
-  const list=db.data.leads||[]; const csv=["name,email,company,phone,notes,ts"].concat(list.map(l=>[l.name||"",l.email||"",l.company||"",l.phone||"", (l.notes||"").replace(/,/g," "), l.ts].join(","))).join("\n");
+  const list=db.data.leads||[]; const csv=["name,email,company,phone,notes,ts"].concat(list.map(l=>[l.name||"",l.email||"",l.company||"",l.phone||"", String(l.notes||"").replace(/,/g," "), l.ts].join(","))).join("\n");
   res.setHeader("Content-Type","text/csv"); res.setHeader("Content-Disposition","attachment; filename=leads.csv"); res.send(csv);
 }catch(e){ res.status(500).send("error"); }});
 
-// Estáticos y bootstrap
 app.use("/l", express.static("/app/data/sites", { extensions:["html"] }));
 app.use("/exports", express.static("/app/data/exports"));
 app.post("/capture/bootstrap", async (req,res)=>{
@@ -751,13 +592,14 @@ if(!r.ok) throw new Error(); ok.classList.remove('hidden'); er.classList.add('hi
     await fs.writeFile(path.join(expDir,"email_sequence.txt"), "Secuencia emails (plantilla)", "utf8");
     await fs.writeFile(path.join(expDir,"linkedin_sequence.txt"), "Secuencia LinkedIn (plantilla)", "utf8");
     await fs.writeFile(path.join(expDir,"google_ads_editor.csv"), "Campaign,...,etc", "utf8");
-    const zipPath=`/app/data/exports/${slug}.zip`;
-    const output=fscore.createWriteStream(zipPath);
-    const archive=archiver("zip",{zlib:{level:9}});
+    const zipPath=`/app/data/exports/${slug}.zip`; const output=fscore.createWriteStream(zipPath); const archive=archiver("zip",{zlib:{level:9}});
     await new Promise((resolve,reject)=>{ output.on("close",resolve); archive.on("error",reject); archive.pipe(output); archive.directory(expDir,false); archive.finalize(); });
     res.json({ ok:true, public_url:`/l/${slug}`, download_zip:`/exports/${slug}.zip` });
   }catch(e){ logger.error(e); res.status(500).json({error:"bootstrap_failed", detail:e.message}); }
 });
 
-// ========= Start =========
+/* ==========================
+   Start
+========================== */
 app.listen(PORT, () => logger.info(`Market Intel Suite running on :${PORT}`));
+
