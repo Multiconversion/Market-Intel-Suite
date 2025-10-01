@@ -6,58 +6,9 @@
     "ttl_days": 365
   },
   {
-    "url": "https://cloud.google.com/feeds/whats-new",
-    "type": "platform",
-    "vertical": "cloud",
-    "ttl_days": 365
-  },
-  {
     "url": "https://aws.amazon.com/about-aws/whats-new/recent/feed/",
     "type": "platform",
     "vertical": "cloud",
     "ttl_days": 365
-  },
-  {
-    "url": "https://azure.microsoft.com/en-us/updates/feed/",
-    "type": "platform",
-    "vertical": "cloud",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://www.pcisecuritystandards.org/pci_security/rss",
-    "type": "regulatory",
-    "vertical": "compliance",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://shopify.engineering/atom.xml",
-    "type": "platform",
-    "vertical": "ecommerce",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://developers.facebook.com/feeds/blog/",
-    "type": "platform",
-    "vertical": "whatsapp",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://digital-strategy.ec.europa.eu/en/rss.xml",
-    "type": "regulatory",
-    "vertical": "compliance",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://www.iso.org/rss_feed/standards",
-    "type": "regulatory",
-    "vertical": "compliance",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://www.enisa.europa.eu/news/enisa-news/RSS",
-    "type": "regulatory",
-    "vertical": "compliance",
-    "ttl_days": 365
   }
 ]
-
