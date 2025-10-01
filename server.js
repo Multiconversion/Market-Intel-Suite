@@ -24,7 +24,7 @@ const logger = pino({ level: process.env.NODE_ENV === "production" ? "info" : "d
 const app = express();
 app.disable("x-powered-by");
 app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));
-app.use(express.json({ limit: "128kb" }));
+app.use(express.json({ limit: "256kb" }));
 app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
 
 // ========= Auth =========
@@ -42,28 +42,30 @@ await db.read();
 db.data ||= { runs: [], leads: [] };
 
 // ========= Billing =========
+async function ensureDir(p) { await fs.mkdir(p, { recursive: true }); }
+function currentMonth() { return new Date().toISOString().slice(0,7); }
 async function loadBilling() {
+  await ensureDir(path.dirname(BILLING_PATH));
   const text = await fs.readFile(BILLING_PATH, "utf8").catch(()=> null);
   if (!text) {
-    const fresh = { month: new Date().toISOString().slice(0,7), spent_usd: 0 };
+    const fresh = { month: currentMonth(), spent_usd: 0 };
     await fs.writeFile(BILLING_PATH, JSON.stringify(fresh, null, 2));
     return fresh;
   }
   try { return JSON.parse(text); } catch {
-    const fresh = { month: new Date().toISOString().slice(0,7), spent_usd: 0 };
+    const fresh = { month: currentMonth(), spent_usd: 0 };
     await fs.writeFile(BILLING_PATH, JSON.stringify(fresh, null, 2));
     return fresh;
   }
 }
 async function saveBilling(b) { await fs.writeFile(BILLING_PATH, JSON.stringify(b, null, 2)); }
-function currentMonth() { return new Date().toISOString().slice(0,7); }
 
 // ========= DataForSEO config =========
 const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true");
 const DFS_LOGIN = process.env.DFS_LOGIN;
 const DFS_PASSWORD = process.env.DFS_PASSWORD;
-const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX
-const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";        // es
+const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX por defecto
+const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";
 
 // Expansión y batches
 const ENABLE_DFS_KFK = /^true$/i.test(process.env.ENABLE_DFS_KFK || "false");
@@ -79,33 +81,104 @@ const B_NEWS  = Number(process.env.URGENCY_BOOST_NEWS  || 0.15);
 const B_FRESH = Number(process.env.URGENCY_BOOST_FRESH || 0.10);
 const B_PAT   = Number(process.env.URGENCY_BOOST_PATTERN||0.10);
 
-// ========= Costes (ajusta a tu plan) =========
+// ========= Costes =========
 const UNIT = {
-  DFS_SV_TASK: 0.075,            // por batch search_volume
-  DFS_SERP_PAGE: 0.002,          // por página (10 resultados)
-  DFS_KFK_TASK: 0.12             // aprox. keywords_for_keywords
+  DFS_SV_TASK: 0.075,
+  DFS_SERP_PAGE: 0.002,
+  DFS_KFK_TASK: 0.12
 };
 
-// ========= HTTP =========
 const http = axios.create({ timeout: 12000 });
-
-// ========= Utils =========
-function ensureDir(p) { return fs.mkdir(p, { recursive: true }); }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function uniqNorm(arr){ const s=new Set(); const out=[]; for(const x of arr||[]){ const t=String(x||"").toLowerCase().trim(); if(t && !s.has(t)){ s.add(t); out.push(t); } } return out; }
 
-// ========= Signals: resolver ruta de fuentes =========
-function resolveSourcesPath() {
-  const candidates = [
-    process.env.SIGNALS_SOURCES_PATH,                 // 1) ENV (si existe)
-    "/app/data/signals_sources.json",                 // 2) volumen persistente
-    "/opt/render/project/src/data/signals_sources.json" // 3) repo en Render
+// ========= (NUEVO) Fuentes por defecto de señales =========
+// *** Se usan solo si no hay archivo, ni ENV JSON, ni ruta válida
+const DEFAULT_SIGNALS_SOURCES = [
+  { url: "https://workspaceupdates.googleblog.com/feeds/posts/default", vertical: "email", region: "LATAM", type: "platform", ttl_days: 365 },
+  { url: "https://developer.chrome.com/feeds/blog.xml", vertical: "generic", region: "LATAM", type: "platform", ttl_days: 365 },
+  { url: "https://shopify.engineering/rss.xml", vertical: "ecommerce", region: "LATAM", type: "platform", ttl_days: 365 },
+  { url: "https://status.shopify.com/history.atom", vertical: "ecommerce", region: "LATAM", type: "platform", ttl_days: 180 },
+  { url: "https://www.pcisecuritystandards.org/feed/", vertical: "compliance", region: "LATAM", type: "regulatory", ttl_days: 365 }
+];
+
+// ========= (NUEVO) Bootstrap de fuentes =========
+let SOURCES_PATH_RESOLVED = null;
+let SOURCES_ORIGIN = null;
+
+function candidatePaths() {
+  return [
+    process.env.SIGNALS_SOURCES_PATH,
+    "/app/data/signals_sources.json",
+    "/opt/render/project/src/data/signals_sources.json"
   ].filter(Boolean);
-  for (const p of candidates) {
-    try { if (fscore.existsSync(p)) return p; } catch {}
+}
+
+async function tryWriteJson(filePath, obj){
+  try {
+    await ensureDir(path.dirname(filePath));
+    await fs.writeFile(filePath, JSON.stringify(obj, null, 2), "utf8");
+    return true;
+  } catch { return false; }
+}
+
+async function bootstrapSources() {
+  // 1) ENV JSON crudo
+  const envJson = process.env.SIGNALS_SOURCES_JSON;
+  if (envJson) {
+    try {
+      const parsed = JSON.parse(envJson);
+      const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
+      if (await tryWriteJson(target, parsed)) {
+        SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "env_json";
+        logger.info({msg:"Signals sources loaded from SIGNALS_SOURCES_JSON", path: target});
+        return SOURCES_PATH_RESOLVED;
+      }
+    } catch (e) {
+      logger.warn({msg:"Invalid SIGNALS_SOURCES_JSON", err: e.message});
+    }
   }
+  // 2) ENV JSON base64
+  const envB64 = process.env.SIGNALS_SOURCES_B64;
+  if (envB64) {
+    try {
+      const buf = Buffer.from(envB64, "base64").toString("utf8");
+      const parsed = JSON.parse(buf);
+      const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
+      if (await tryWriteJson(target, parsed)) {
+        SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "env_b64";
+        logger.info({msg:"Signals sources loaded from SIGNALS_SOURCES_B64", path: target});
+        return SOURCES_PATH_RESOLVED;
+      }
+    } catch (e) {
+      logger.warn({msg:"Invalid SIGNALS_SOURCES_B64", err: e.message});
+    }
+  }
+  // 3) Rutas candidatas existentes
+  for (const p of candidatePaths()) {
+    try {
+      if (fscore.existsSync(p)) {
+        SOURCES_PATH_RESOLVED = p; SOURCES_ORIGIN = "file_existing";
+        logger.info({msg:"Signals sources found", path: p});
+        return SOURCES_PATH_RESOLVED;
+      }
+    } catch {}
+  }
+  // 4) Fallback: crear archivo por defecto en /app/data
+  const fallback = "/app/data/signals_sources.json";
+  if (await tryWriteJson(fallback, DEFAULT_SIGNALS_SOURCES)) {
+    SOURCES_PATH_RESOLVED = fallback; SOURCES_ORIGIN = "default_bootstrap";
+    logger.warn({msg:"Signals sources not found; bootstrapped defaults", path: fallback});
+    return SOURCES_PATH_RESOLVED;
+  }
+  // 5) Si algo falla, deja nulo
+  logger.error({msg:"Unable to bootstrap signals sources"});
   return null;
 }
+
+// Ejecuta bootstrap al inicio
+await ensureDir("/app/data");
+await bootstrapSources();
 
 // ========= Health =========
 app.get("/healthz", async (_req, res) => {
@@ -113,79 +186,56 @@ app.get("/healthz", async (_req, res) => {
   res.json({ ok: true, month: billing.month, spent: billing.spent_usd });
 });
 
-// ========= DEBUG: ver rutas reales y preview =========
-app.get("/signals/debug", async (req, res) => {
+// ========= (MEJORADO) Debug de fuentes =========
+app.get("/signals/sources/debug", async (_req, res) => {
   const envPath = process.env.SIGNALS_SOURCES_PATH || null;
-  const candidates = [
-    envPath,
-    "/app/data/signals_sources.json",
-    "/opt/render/project/src/data/signals_sources.json"
-  ].filter(Boolean);
-
-  const checks = candidates.map(p => {
+  const envJson = !!process.env.SIGNALS_SOURCES_JSON;
+  const envB64 = !!process.env.SIGNALS_SOURCES_B64;
+  const candidates = candidatePaths().map(p => {
     let exists = false; let size = null;
     try {
-      if (fscore.existsSync(p)) {
-        const st = fscore.statSync(p);
-        exists = true; size = st.size;
-      }
+      if (fscore.existsSync(p)) { const st = fscore.statSync(p); exists = true; size = st.size; }
     } catch {}
     return { path: p, exists, size };
   });
-
-  const resolved = (() => {
-    for (const c of checks) if (c.exists) return c.path;
-    return null;
-  })();
-
   let head = null;
-  if (resolved) {
+  if (SOURCES_PATH_RESOLVED) {
     try {
-      const txt = await fs.readFile(resolved, "utf8");
+      const txt = await fs.readFile(SOURCES_PATH_RESOLVED, "utf8");
       head = txt.slice(0, 400);
     } catch {}
   }
-
   res.json({
-    env: {
-      SIGNALS_SOURCES_PATH: envPath,
-      SIGNALS_PATH: process.env.SIGNALS_PATH || null
-    },
+    env: { SIGNALS_SOURCES_PATH: envPath, has_SIGNALS_SOURCES_JSON: envJson, has_SIGNALS_SOURCES_B64: envB64, SIGNALS_PATH },
     cwd: process.cwd(),
-    candidates: checks,
-    resolved,
+    candidates,
+    resolved: SOURCES_PATH_RESOLVED,
+    origin: SOURCES_ORIGIN,
     head_preview: head
   });
 });
 
 // ========= SERP (features + señales + PAA/Related) =========
+const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
 async function dfsSerpFeatures(keyword, pages = 1) {
   if (!ENABLE_DATAFORSEO) {
     return { paid_density: 0.4, serp_features_load: 0.5, volatility: 0.2, cost: 0,
       serp_signals: { hasNews:false, freshShare:0, paa:[], related:[] } };
   }
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
-  const payload = [{
-    keyword,
-    location_code: DFS_LOCATION_CODE,
-    language_code: DFS_LANGUAGE_CODE,
-    depth: pages*10
-  }];
+  const payload = [{ keyword, location_code: DFS_LOCATION_CODE, language_code: DFS_LANGUAGE_CODE, depth: pages*10 }];
 
   try {
     const { data } = await http.post(
       "https://api.dataforseo.com/v3/serp/google/organic/live/advanced",
-      payload,
-      { auth }
+      payload, { auth }
     );
-
     const items = data?.tasks?.[0]?.result?.[0]?.items || [];
     const ads = items.filter(i=>i.type==="ad").length;
     const paid_density = Math.min(1, ads/(pages*10));
     const nonOrganic = items.filter(i=>i.type!=="organic").length;
     const serp_features_load = Math.min(1, nonOrganic/(pages*10));
 
-    // señales dinámicas
     const now = Date.now();
     const THRESH_DAYS = 45;
     const hasNews = items.some(i => ["top_stories","news","google_news"].includes(String(i.type||"").toLowerCase()));
@@ -196,7 +246,6 @@ async function dfsSerpFeatures(keyword, pages = 1) {
     }).length;
     const freshShare = items.length ? freshCount/items.length : 0;
 
-    // PAA & Related
     const paaTitles = [];
     const relatedTerms = [];
     for (const it of items) {
@@ -229,22 +278,16 @@ async function dfsSerpFeatures(keyword, pages = 1) {
   }
 }
 
-// ========= Keywords for Keywords (sin 'limit'; cortamos local) =========
+// ========= Keywords for Keywords =========
 async function dfsKeywordsForKeywords(seed) {
   if (!ENABLE_DATAFORSEO || !ENABLE_DFS_KFK) return { keywords: [], cost: 0 };
-
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
-  const payload = [{
-    location_code: DFS_LOCATION_CODE,
-    language_code: DFS_LANGUAGE_CODE,
-    keywords: [seed]
-  }];
+  const payload = [{ location_code: DFS_LOCATION_CODE, language_code: DFS_LANGUAGE_CODE, keywords: [seed] }];
 
   try {
     const { data } = await http.post(
       "https://api.dataforseo.com/v3/keywords_data/google_ads/keywords_for_keywords/live",
-      payload,
-      { auth }
+      payload, { auth }
     );
     const items = data?.tasks?.[0]?.result?.[0]?.items || [];
     const kws = items.map(it => String(it.keyword||"").trim()).filter(Boolean);
@@ -279,15 +322,11 @@ async function dfsSearchVolumeChunks(keywords){
     return { cost:0, total_sv:15000, avg_cpc:1.1, trend:0.12, transactional_share:0.6 };
   }
   const auth = { username: DFS_LOGIN, password: DFS_PASSWORD };
-
   const chunks = [];
-  for (let i=0; i<keywords.length; i+=DFS_SV_BATCH_SIZE) {
-    chunks.push(keywords.slice(i, i+DFS_SV_BATCH_SIZE));
-  }
+  for (let i=0; i<keywords.length; i+=DFS_SV_BATCH_SIZE) chunks.push(keywords.slice(i, i+DFS_SV_BATCH_SIZE));
 
   let total_sv = 0, w_cpc = 0, transCount = 0, tasksCost = 0;
   const months = new Map();
-
   const isTransactional = (kw, cpc, comp) => {
     const k = (kw||"").toLowerCase();
     const patterns = ["precio","coste","comprar","proveedor","consultor","consultoría","auditor","servicio",
@@ -296,17 +335,11 @@ async function dfsSearchVolumeChunks(keywords){
   };
 
   for (let c=0; c<chunks.length; c++){
-    const payload = [{
-      location_code: DFS_LOCATION_CODE,
-      language_code: DFS_LANGUAGE_CODE,
-      keywords: chunks[c]
-    }];
-
+    const payload = [{ location_code: DFS_LOCATION_CODE, language_code: DFS_LANGUAGE_CODE, keywords: chunks[c] }];
     try {
       const { data } = await http.post(
         "https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live",
-        payload,
-        { auth }
+        payload, { auth }
       );
       const items = data?.tasks?.[0]?.result?.[0]?.items || [];
       for (const it of items) {
@@ -345,20 +378,7 @@ async function dfsSearchVolumeChunks(keywords){
   return { cost: tasksCost, total_sv, avg_cpc, trend, transactional_share };
 }
 
-// ========= buildKeywordSet =========
-async function buildKeywordSet(topic, serpSignals){
-  const seeds = [topic];
-  const fromSerp = []
-    .concat(serpSignals?.paa || [])
-    .concat(serpSignals?.related || []);
-  let kfk = { keywords:[], cost:0 };
-  if (ENABLE_DFS_KFK) kfk = await dfsKeywordsForKeywords(topic);
-  const heur = heuristicExpand(topic);
-  const all = uniqNorm([...seeds, ...fromSerp, ...kfk.keywords, ...heur]);
-  return { keywords: all.slice(0, MAX_KEYWORDS_EXPANDED), cost: kfk.cost };
-}
-
-// ========= Urgency 2.0 =========
+// ========= Demand & Urgency =========
 function mapVertical(topic){
   const t = String(topic||"").toLowerCase();
   if (t.includes("whatsapp")) return "whatsapp";
@@ -370,11 +390,9 @@ function mapVertical(topic){
 function computeUrgency(topic, region, serpSignals, allSignals){
   const vertical = mapVertical(topic);
   const today = new Date();
-
   const relevant = (allSignals||[]).filter(ev =>
     (!vertical || ev.vertical===vertical) && (!region || ev.region===region)
   );
-
   let base = 0;
   if (relevant.length) {
     base = Math.max(...relevant.map(r => {
@@ -390,22 +408,17 @@ function computeUrgency(topic, region, serpSignals, allSignals){
   if ((serpSignals?.freshShare||0) >= 0.3) boost += B_FRESH;
   const pattern = /\b(202[4-9]|migraci[oó]n|requisitos|obligatorio|v\d(\.\d)?)\b/i;
   if (pattern.test(String(topic))) boost += B_PAT;
-
   return Math.max(0, Math.min(1, base + boost));
 }
-
-// ========= Demand Index 2.0 =========
 function computeDemandIndex(batch){
   const sv = Number(batch.total_sv || 0);
   const cpc = Number(batch.avg_cpc || 0);
   const trend = Number(batch.trend || 0);
   const trans = Number(batch.transactional_share || 0);
-
   const svFactor = Math.min(1, Math.sqrt(sv)/220);
   const cpcFactor = Math.min(1, cpc/2);
   const trendClamp = Math.max(-0.5, Math.min(0.5, trend));
   const trendFactor = (trendClamp + 0.5);
-
   const demandIdx = 0.50*svFactor + 0.20*trans + 0.20*trendFactor + 0.10*cpcFactor;
   return Number(demandIdx.toFixed(2));
 }
@@ -432,7 +445,10 @@ app.post("/score/run", async (req, res) => {
 
   try {
     const serp = await dfsSerpFeatures(topic, 1);
-    const { keywords: kwSet, cost: kfkCost } = await buildKeywordSet(topic, serp.serp_signals);
+    const fromSerp = [].concat(serp.serp_signals?.paa || []).concat(serp.serp_signals?.related || []);
+    const kfk = await dfsKeywordsForKeywords(topic);
+    const heur = heuristicExpand(topic);
+    const kwSet = uniqNorm([topic, ...fromSerp, ...(kfk.keywords||[]), ...heur]).slice(0, MAX_KEYWORDS_EXPANDED);
     const svAgg = await dfsSearchVolumeChunks(kwSet);
 
     const signals = await getSignals();
@@ -441,7 +457,6 @@ app.post("/score/run", async (req, res) => {
     const CompIdx = Math.max(0, Math.min(1,
       1 - (0.55 + serp.paid_density + serp.serp_features_load)/2.5 + 0.2*serp.volatility
     ));
-
     const PlatFit = 0.7, Oper = 0.8;
     const TtC = U >= 0.6 ? 14 : 24;
     const GP = 18320;
@@ -451,7 +466,7 @@ app.post("/score/run", async (req, res) => {
     const score = 25*U + 15*gTtC + 15*ProfitIdx + 15*DemandIdx + 15*CompIdx + 10*PlatFit + 5*Oper;
     const decision = (score>=70 && U>=0.6 && TtC<=21) ? "GO" : (score>=60 ? "CONDITIONAL" : "NO-GO");
 
-    const runCost = (serp.cost||0) + (svAgg.cost||0) + (kfkCost||0);
+    const runCost = (serp.cost||0) + (svAgg.cost||0) + (kfk.cost||0);
     const bill = await loadBilling();
     if (bill.month !== currentMonth()) { bill.month = currentMonth(); bill.spent_usd = 0; }
     bill.spent_usd += runCost; await saveBilling(bill);
@@ -486,10 +501,31 @@ app.post("/score/run", async (req, res) => {
 });
 
 // ========= SIGNALS PRO =========
-// Upsert
+
+// (NUEVO) Subir/actualizar las fuentes directamente (JSON o {sources:[...]})
+app.post("/signals/sources/put", async (req, res) => {
+  try {
+    const body = req.body;
+    const sources = Array.isArray(body) ? body : (Array.isArray(body?.sources) ? body.sources : null);
+    if (!sources) return res.status(400).json({ ok:false, error:"Provide an array or {sources:[...]}" });
+
+    const target = process.env.SIGNALS_SOURCES_PATH || "/app/data/signals_sources.json";
+    await ensureDir(path.dirname(target));
+    await fs.writeFile(target, JSON.stringify(sources, null, 2), "utf8");
+
+    // Reanclar ruta resuelta
+    SOURCES_PATH_RESOLVED = target; SOURCES_ORIGIN = "put_endpoint";
+    return res.json({ ok:true, path: target, count: sources.length });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+// Upsert de señales (resultado procesado)
 app.post("/signals/upsert", async (req,res)=>{
   try{
     const now = new Date().toISOString();
+    await ensureDir(path.dirname(SIGNALS_PATH));
     const raw = await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]");
     const arr = JSON.parse(raw);
     const obj = { ...req.body };
@@ -497,14 +533,13 @@ app.post("/signals/upsert", async (req,res)=>{
     obj.updated_at = now;
     const idx = arr.findIndex(s => s.id===obj.id);
     if (idx>=0) arr[idx] = {...arr[idx], ...obj}; else arr.push(obj);
-    await ensureDir(path.dirname(SIGNALS_PATH));
     await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr, null, 2));
     cachedSignals = null;
     res.json({ok:true, id: obj.id, total: arr.length});
   }catch(e){ res.status(500).json({ok:false, error:e.message}); }
 });
 
-// List
+// Listado de señales procesadas
 app.get("/signals/list", async (req,res)=>{
   try{
     const { region, vertical, activeOnly } = req.query;
@@ -526,7 +561,7 @@ app.get("/signals/list", async (req,res)=>{
   }catch(e){ res.status(500).json({ok:false, error:e.message}); }
 });
 
-// Delete
+// Borrado de señal
 app.delete("/signals/delete", async (req,res)=>{
   try{
     const { id } = req.query;
@@ -541,9 +576,7 @@ app.delete("/signals/delete", async (req,res)=>{
   }catch(e){ res.status(500).json({ok:false, error:e.message}); }
 });
 
-// Auto-refresh
-const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "" });
-
+// Auto-refresh desde RSS/Atom usando la ruta resuelta
 function guessVertical(title){
   const t = (title||"").toLowerCase();
   if (t.includes("pci")) return "compliance";
@@ -565,28 +598,39 @@ function severityFromText(title){
   return 3;
 }
 
-app.post("/signals/auto/refresh", async (req,res)=>{
+app.post("/signals/auto/refresh", async (_req,res)=>{
   try{
-    const srcPath = resolveSourcesPath();
-    if (!srcPath) return res.json({ ok:true, added:0, total:0, note:"signals_sources.json not found" });
+    // Reintenta bootstrap por si cambió el entorno
+    if (!SOURCES_PATH_RESOLVED) await bootstrapSources();
+
+    const srcPath = SOURCES_PATH_RESOLVED;
+    if (!srcPath || !fscore.existsSync(srcPath)) {
+      return res.json({ ok:true, added:0, total:0, note:"signals_sources.json not found (post-bootstrap)" });
+    }
 
     const srcText = await fs.readFile(srcPath,"utf8").catch(()=> "[]");
-    const sources = JSON.parse(srcText);
+    let sources = [];
+    try {
+      const parsed = JSON.parse(srcText);
+      sources = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.sources) ? parsed.sources : []);
+    } catch (e) {
+      return res.status(400).json({ ok:false, error:"invalid_sources_json", detail: e.message });
+    }
+
     const raw = await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]");
     const arr = JSON.parse(raw);
-
     let added = 0;
-    for (const s of sources) {
-      try {
-        const { data } = await axios.get(s.url, { timeout: 12000 });
-        const xml = parser.parse(data);
 
+    for (const s of sources) {
+      if (!s?.url) continue;
+      try {
+        const { data } = await axios.get(s.url, { timeout: 15000 });
+        const xml = parser.parse(data);
         let items = [];
         if (xml?.rss?.channel?.item) items = xml.rss.channel.item;
         else if (xml?.feed?.entry) items = xml.feed.entry;
         else if (Array.isArray(xml?.rss?.item)) items = xml.rss.item;
         else if (Array.isArray(xml?.entry)) items = xml.entry;
-
         if (!Array.isArray(items)) items = [items].filter(Boolean);
         if (!items.length) {
           logger.warn({ msg:"no items found", source: s.url });
@@ -620,7 +664,7 @@ app.post("/signals/auto/refresh", async (req,res)=>{
 
     await ensureDir(path.dirname(SIGNALS_PATH));
     await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr, null, 2));
-    res.json({ ok:true, added, total: arr.length });
+    res.json({ ok:true, added, total: arr.length, used_path: srcPath, origin: SOURCES_ORIGIN });
   }catch(e){ res.status(500).json({ ok:false, error: e.message }); }
 });
 
@@ -709,3 +753,4 @@ app.post("/capture/bootstrap", async (req, res) => {
 
 // ========= Start =========
 app.listen(PORT, () => logger.info(`Market Intel Suite running on :${PORT}`));
+
