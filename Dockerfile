@@ -1,37 +1,50 @@
-# =====================
-# 1. Stage de build
-# =====================
-FROM node:18 AS builder
+# ================
+# 1) Builder
+# ================
+FROM node:18-alpine AS builder
+
+# Evita prompts y reduce tamaño
+ENV NODE_ENV=production
 
 WORKDIR /app
 
-# Copiar manifest y lock para instalar dependencias
+# Copiamos manifests primero para cache de dependencias
 COPY package*.json ./
 
-# Instalar TODAS las dependencias (incluyendo dev si algún script lo necesita)
-RUN npm install
+# Instala solo deps de producción, rápido y reproducible
+RUN npm ci --omit=dev
 
-# Copiar el resto del código fuente (incluyendo carpeta data/)
-COPY . .
+# Copiamos solo lo necesario para runtime
+# (server, datos y openapi si lo sirves como estático)
+COPY server.js ./server.js
+COPY data ./data
 
-# =====================
-# 2. Stage final (runtime)
-# =====================
-FROM node:18-slim AS runtime
+# ================
+# 2) Runtime
+# ================
+FROM node:18-alpine AS runtime
+
+# Crear usuario no-root y carpetas con permisos correctos
+RUN addgroup -S app && adduser -S app -G app
 
 WORKDIR /app
 
-# Copiar solo lo necesario desde el builder
-COPY --from=builder /app/package*.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/server.js ./server.js
-COPY --from=builder /app/data ./data
+# Copiar node_modules y código ya preparado del builder
+COPY --from=builder --chown=app:app /app/node_modules ./node_modules
+COPY --from=builder --chown=app:app /app/server.js ./server.js
+COPY --from=builder --chown=app:app /app/data ./data
 
-# Variables de entorno por defecto (se pueden sobreescribir en Render)
+# Variables por defecto (Render las puede sobrescribir)
 ENV NODE_ENV=production
 ENV PORT=3000
 
+# Salud del contenedor (wget viene en alpine)
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD wget -qO- http://127.0.0.1:3000/healthz || exit 1
+
+# Cambiar a usuario no-root
+USER app
+
 EXPOSE 3000
 
-# Comando por defecto
-CMD ["npm", "start"]
+# Ejecutar Node directamente (menos overhead que npm start)
+CMD ["node", "server.js"]
