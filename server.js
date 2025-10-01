@@ -73,7 +73,7 @@ async function saveBilling(b) { await fs.writeFile(BILLING_PATH, JSON.stringify(
 const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true");
 const DFS_LOGIN = process.env.DFS_LOGIN;
 const DFS_PASSWORD = process.env.DFS_PASSWORD;
-const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX
+const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX por defecto
 const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";
 
 // Expansión y batches
