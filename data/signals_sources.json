@@ -1,32 +1,8 @@
 [
   {
-    "url": "https://www.pcisecuritystandards.org/pci_security/rss",
-    "type": "regulatory",
-    "vertical": "compliance",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://shopify.engineering/atom.xml",
-    "type": "platform",
-    "vertical": "ecommerce",
-    "ttl_days": 365
-  },
-  {
     "url": "https://workspaceupdates.googleblog.com/feeds/posts/default",
     "type": "platform",
     "vertical": "email",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://developers.facebook.com/feeds/blog/",
-    "type": "platform",
-    "vertical": "whatsapp",
-    "ttl_days": 365
-  },
-  {
-    "url": "https://digital-strategy.ec.europa.eu/en/rss.xml",
-    "type": "regulatory",
-    "vertical": "compliance",
     "ttl_days": 365
   }
 ]
