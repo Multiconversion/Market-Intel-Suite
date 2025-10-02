@@ -24,7 +24,7 @@ const SIGNALS_PATH = process.env.SIGNALS_PATH || `${DATA_DIR}/signals_events.jso
 const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true");
 const DFS_LOGIN = process.env.DFS_LOGIN || "";
 const DFS_PASSWORD = process.env.DFS_PASSWORD || "";
-const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX default
+const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX por defecto
 const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";
 const ENABLE_DFS_KFK = /^true$/i.test(process.env.ENABLE_DFS_KFK || "true");
 
@@ -39,7 +39,7 @@ const W_IMP  = Number(process.env.URGENCY_W_IMP  || 0.2);
 const B_NEWS = Number(process.env.URGENCY_BOOST_NEWS  || 0.15);
 const B_FRESH= Number(process.env.URGENCY_BOOST_FRESH || 0.10);
 const B_PAT  = Number(process.env.URGENCY_BOOST_PATTERN || 0.10);
-const URGENCY_FLOOR = Number(process.env.URGENCY_FLOOR || 0.15); // piso opcional
+const URGENCY_FLOOR = Number(process.env.URGENCY_FLOOR || 0.15); // piso mínimo si hay actividad en SERP
 
 /* Clustering */
 const CLUSTER_JACCARD_T = Math.max(0.1, Math.min(0.9, Number(process.env.CLUSTER_JACCARD_T || 0.42)));
@@ -48,7 +48,7 @@ const CLUSTER_MIN_SIZE  = Math.max(1, Number(process.env.CLUSTER_MIN_SIZE || 2))
 /* Cost units (aprox) */
 const UNIT = { DFS_SV_TASK: 0.075, DFS_SERP_PAGE: 0.002, DFS_KFK_TASK: 0.12, DFS_AUTOCOMPLETE: 0.002 };
 
-/* Señales por defecto (se sobreescriben si subes tu sources.json) */
+/* Fuentes por defecto de señales */
 const DEFAULT_SIGNALS_SOURCES = [
   { url: "https://workspaceupdates.googleblog.com/feeds/posts/default", vertical: "email",      region: "LATAM", type: "platform", ttl_days: 365 },
   { url: "https://developer.chrome.com/feeds/blog.xml",                  vertical: "generic",    region: "LATAM", type: "platform", ttl_days: 365 },
@@ -67,7 +67,7 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));
 app.use(express.json({ limit: "256kb" }));
 app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
 
-/* Auth simple para todo excepto /healthz */
+/* Auth simple: todo excepto /healthz requiere x-api-key */
 app.use((req, res, next) => {
   if (req.path === "/healthz") return next();
   const key = req.headers["x-api-key"];
@@ -338,8 +338,12 @@ async function dfsAutocompleteExpand(seeds, geo){
   return { keywords: Array.from(out), cost };
 }
 
+/* ---- PARCHE CLAVE: Search Volume robusto con fallback monthly_searches ---- */
 async function dfsSearchVolumeChunks(keywords, geo){
-  if(!ENABLE_DATAFORSEO) return { cost:0, total_sv:15000, avg_cpc:1.1, trend:0.12, transactional_share:0.6, items:[] };
+  if(!ENABLE_DATAFORSEO) {
+    return { cost:0, total_sv:15000, avg_cpc:1.1, trend:0.12, transactional_share:0.6, items:[] };
+  }
+
   const { cleaned, rejected } = sanitizeKeywords(keywords);
   if(!cleaned.length) return { cost:0, total_sv:0, avg_cpc:0, trend:0, transactional_share:0, items:[] };
   if (rejected.length) logger.warn({ msg:"SV rejected", count: rejected.length, sample: rejected.slice(0,5) });
@@ -349,44 +353,108 @@ async function dfsSearchVolumeChunks(keywords, geo){
   const loc=geo?.loc||DFS_LOCATION_CODE;
 
   const chunks=[]; for(let i=0;i<cleaned.length;i+=DFS_SV_BATCH_SIZE) chunks.push(cleaned.slice(i,i+DFS_SV_BATCH_SIZE));
-  let total_sv=0, w_cpc=0, transCount=0, tasksCost=0; const months=new Map(); const perKw=[];
-  const isTrans=(kw,cpc,comp)=>{ const k=(kw||"").toLowerCase(); const pats=["price","pricing","cost","buy","vendor","consultant","service","software","tool","implementation","migration","plans","quote","plan","package","pos"]; return pats.some(p=>k.includes(p)) || cpc>=0.5 || comp>=0.5; };
+
+  let total_sv=0, w_cpc=0, transCount=0, tasksCost=0;
+  const months=new Map(); // yyyy-mm => sum
+  const perKw=[];
+
+  const isTrans=(kw,cpc,comp)=>{
+    const k=(kw||"").toLowerCase();
+    const pats=["price","pricing","cost","buy","vendor","consultant","service","software","tool","implementation","migration","plans","quote","plan","package","pos"];
+    return pats.some(p=>k.includes(p)) || cpc>=0.5 || comp>=0.5;
+  };
 
   for(let c=0;c<chunks.length;c++){
     const payload=[{ location_code:loc, language_code:lang, keywords:chunks[c] }];
     try{
-      const { data } = await http.post("https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live", payload, { auth });
-      const items=data?.tasks?.[0]?.result?.[0]?.items||[];
+      const { data } = await http.post(
+        "https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live",
+        payload, { auth }
+      );
+
+      const task = data?.tasks?.[0];
+      const statusCode = task?.status_code || data?.status_code;
+      if (statusCode && statusCode !== 20000) {
+        logger.warn({ msg:"DFS SV non-OK", statusCode, statusMessage: task?.status_message });
+      }
+
+      const items = task?.result?.[0]?.items || [];
+
       for(const it of items){
-        const kw=String(it.keyword||"");
-        const sv=Number(it.search_volume||0);
-        const cpc=Number((it.cpc && (Array.isArray(it.cpc) ? it.cpc[0]?.value : it.cpc.value)) || 0);
-        const comp=Number(it.competition||0);
-        const trans=isTrans(kw,cpc,comp);
-        total_sv+=sv; w_cpc+=cpc*sv; if(trans) transCount++;
-        perKw.push({ keyword:kw, sv, cpc, comp, transactional:trans });
-        const ms=it.monthly_searches||it.search_volume_by_month||[];
-        for(const m of ms){
-          const y=m.year||m.month?.split("-")?.[0];
-          const mon=m.month||(m.month_num&&String(m.month_num).padStart(2,"0"));
-          const key=(y&&mon)?`${y}-${mon}`:null;
-          const v=Number(m.search_volume||m.value||0);
-          if(key) months.set(key,(months.get(key)||0)+v);
+        const kw = String(it.keyword || "").trim();
+
+        const cpc = Number(
+          (typeof it.cpc === "number" ? it.cpc :
+           Array.isArray(it.cpc) ? it.cpc[0]?.value :
+           it.cpc?.value) || 0
+        );
+        const comp = Number(it.competition || 0);
+
+        // normaliza monthly_searches
+        const monthly = it.monthly_searches || it.search_volume_by_month || [];
+        const norm = monthly.map(m => ({
+          y: Number(m.year || (m.month ? String(m.month).slice(0,4) : 0)) || 0,
+          m: Number(m.month_num || (m.month ? String(m.month).slice(-2) : 0)) || 0,
+          v: Number(m.search_volume || m.value || 0) || 0
+        })).sort((a,b)=> a.y - b.y || a.m - b.m);
+
+        // último mes no-nulo y media 12m
+        let latest = 0;
+        for (let i = norm.length - 1; i >= 0; i--) {
+          if (norm[i].v > 0) { latest = norm[i].v; break; }
+        }
+        const avg12 = norm.length ? (norm.reduce((s,x)=>s + x.v, 0) / norm.length) : 0;
+
+        // sv con fallback
+        const sv = Number(
+          (it.search_volume != null ? it.search_volume : (latest || avg12)) || 0
+        );
+
+        total_sv += sv;
+        w_cpc += cpc * sv;
+        const trans = isTrans(kw, cpc, comp);
+        if (trans) transCount++;
+
+        perKw.push({ keyword: kw, sv, cpc, comp, transactional: trans });
+
+        // timeline
+        for(const m of norm){
+          if (m.y && m.m) {
+            const key = `${m.y}-${String(m.m).padStart(2,"0")}`;
+            months.set(key, (months.get(key) || 0) + m.v);
+          }
         }
       }
-      tasksCost+=UNIT.DFS_SV_TASK;
+
+      tasksCost += UNIT.DFS_SV_TASK;
     }catch(e){
-      logger.warn({ msg:"DFS SV error", err:e.message });
+      logger.warn({ msg:"DFS SV error", err: e.message, chunkIndex: c });
     }
     if(c<chunks.length-1 && DFS_SLEEP_MS>0) await sleep(DFS_SLEEP_MS);
   }
 
   const avg_cpc = total_sv ? (w_cpc/total_sv) : 0;
-  const sorted=Array.from(months.keys()).sort(); const last12=sorted.slice(-12); const vals=last12.map(k=>months.get(k)||0);
-  const prev6=vals.slice(0,6).reduce((a,b)=>a+b,0), last6=vals.slice(-6).reduce((a,b)=>a+b,0);
-  const trend = prev6>0 ? (last6-prev6)/prev6 : 0;
-  const transactional_share = (perKw.length||1) ? (perKw.filter(x=>x.transactional).length/Math.max(1,perKw.length)) : 0;
-  return { cost:tasksCost, total_sv, avg_cpc, trend, transactional_share, items: perKw };
+
+  // tendencia 6m vs 6m últimos 12
+  const sorted=Array.from(months.keys()).sort();
+  const last12=sorted.slice(-12);
+  const vals=last12.map(k=>months.get(k)||0);
+  const prev6=vals.slice(0,6).reduce((a,b)=>a+b,0);
+  const last6=vals.slice(-6).reduce((a,b)=>a+b,0);
+  const trend = prev6>0 ? (last6 - prev6) / prev6 : 0;
+
+  const transactional_share = (perKw.length||1)
+    ? (perKw.filter(x=>x.transactional).length / Math.max(1,perKw.length))
+    : 0;
+
+  return {
+    cost: tasksCost,
+    total_sv,
+    avg_cpc,
+    trend,
+    transactional_share,
+    items: perKw
+  };
 }
 
 /* ==========================
@@ -655,6 +723,29 @@ async function start(){
     }catch(e){ res.status(500).json({ error:"internal_error", detail:e.message }); }
   });
 
+  /* ====== Diagnóstico crudo DFS SV ====== */
+  app.post("/dfs/sv/raw", async (req, res) => {
+    try {
+      const { keywords = ["restaurant software","restaurant pos","kitchen display system"], region="US", language="en" } = req.body || {};
+      const geo = resolveGeo(language, region);
+      const auth={ username: DFS_LOGIN, password: DFS_PASSWORD };
+      const payload=[{ location_code: geo.loc, language_code: geo.lang, keywords }];
+      const { data } = await http.post(
+        "https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live",
+        payload, { auth }
+      );
+      const task = data?.tasks?.[0];
+      const items = task?.result?.[0]?.items || [];
+      res.json({
+        status_code: task?.status_code || data?.status_code,
+        status_message: task?.status_message,
+        sample: items.slice(0,5)
+      });
+    } catch (e) {
+      res.status(500).json({ error:"dfs_sv_raw_failed", detail:e.message });
+    }
+  });
+
   /* ====== LEADS & CAPTACIÓN ====== */
   app.post("/leads/collect", async (req,res)=>{ try{
     const raw=await fs.readFile(DB_PATH,"utf8").catch(()=> JSON.stringify({leads:[]})); const db=JSON.parse(raw); db.leads=db.leads||[];
@@ -720,4 +811,3 @@ if(!r.ok) throw new Error(); ok.classList.remove('hidden'); er.classList.add('hi
 }
 
 start();
-
