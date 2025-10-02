@@ -24,30 +24,36 @@ const SIGNALS_PATH = process.env.SIGNALS_PATH || `${DATA_DIR}/signals_events.jso
 const ENABLE_DATAFORSEO = /^true$/i.test(process.env.ENABLE_DATAFORSEO || "true");
 const DFS_LOGIN = process.env.DFS_LOGIN || "";
 const DFS_PASSWORD = process.env.DFS_PASSWORD || "";
-const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX
+const DFS_LOCATION_CODE = Number(process.env.DFS_LOCATION_CODE || 2056); // MX default
 const DFS_LANGUAGE_CODE = process.env.DFS_LANGUAGE_CODE || "es";
 const ENABLE_DFS_KFK = /^true$/i.test(process.env.ENABLE_DFS_KFK || "true");
+
 const MAX_KEYWORDS_EXPANDED = Math.min(200, Math.max(10, Number(process.env.MAX_KEYWORDS_EXPANDED || 120)));
 const DFS_SV_BATCH_SIZE = Math.min(1000, Math.max(1, Number(process.env.DFS_SV_BATCH_SIZE || 200)));
 const DFS_SLEEP_MS = Math.max(0, Number(process.env.DFS_SLEEP_MS || 650));
 
+/* Urgency weights */
 const W_PROX = Number(process.env.URGENCY_W_PROX || 0.5);
 const W_SEV  = Number(process.env.URGENCY_W_SEV  || 0.3);
 const W_IMP  = Number(process.env.URGENCY_W_IMP  || 0.2);
 const B_NEWS = Number(process.env.URGENCY_BOOST_NEWS  || 0.15);
 const B_FRESH= Number(process.env.URGENCY_BOOST_FRESH || 0.10);
 const B_PAT  = Number(process.env.URGENCY_BOOST_PATTERN || 0.10);
+const URGENCY_FLOOR = Number(process.env.URGENCY_FLOOR || 0.15); // piso opcional
 
+/* Clustering */
 const CLUSTER_JACCARD_T = Math.max(0.1, Math.min(0.9, Number(process.env.CLUSTER_JACCARD_T || 0.42)));
 const CLUSTER_MIN_SIZE  = Math.max(1, Number(process.env.CLUSTER_MIN_SIZE || 2));
 
+/* Cost units (aprox) */
 const UNIT = { DFS_SV_TASK: 0.075, DFS_SERP_PAGE: 0.002, DFS_KFK_TASK: 0.12, DFS_AUTOCOMPLETE: 0.002 };
 
+/* Señales por defecto (se sobreescriben si subes tu sources.json) */
 const DEFAULT_SIGNALS_SOURCES = [
-  { url: "https://workspaceupdates.googleblog.com/feeds/posts/default", vertical: "email", region: "LATAM", type: "platform", ttl_days: 365 },
-  { url: "https://developer.chrome.com/feeds/blog.xml", vertical: "generic", region: "LATAM", type: "platform", ttl_days: 365 },
-  { url: "https://www.pcisecuritystandards.org/pci_security/rss", vertical: "compliance", region: "LATAM", type: "regulatory", ttl_days: 365 },
-  { url: "https://shopify.engineering/atom.xml", vertical: "ecommerce", region: "LATAM", type: "platform", ttl_days: 365 }
+  { url: "https://workspaceupdates.googleblog.com/feeds/posts/default", vertical: "email",      region: "LATAM", type: "platform", ttl_days: 365 },
+  { url: "https://developer.chrome.com/feeds/blog.xml",                  vertical: "generic",    region: "LATAM", type: "platform", ttl_days: 365 },
+  { url: "https://www.pcisecuritystandards.org/pci_security/rss",        vertical: "compliance", region: "LATAM", type: "regulatory", ttl_days: 365 },
+  { url: "https://shopify.engineering/atom.xml",                         vertical: "ecommerce",  region: "LATAM", type: "platform", ttl_days: 365 }
 ];
 
 /* ==========================
@@ -61,6 +67,7 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "same-origin" } }));
 app.use(express.json({ limit: "256kb" }));
 app.use(rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true, legacyHeaders: false }));
 
+/* Auth simple para todo excepto /healthz */
 app.use((req, res, next) => {
   if (req.path === "/healthz") return next();
   const key = req.headers["x-api-key"];
@@ -75,7 +82,7 @@ function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 async function ensureDir(p){ await fs.mkdir(p, { recursive: true }); }
 function currentMonth(){ return new Date().toISOString().slice(0,7); }
 function stripAccents(s){ return s.normalize("NFD").replace(/[\u0300-\u036f]/g,""); }
-function uniqNorm(arr){ const s=new Set(); const out=[]; for (const x of arr||[]){ const t=String(x||"").toLowerCase().trim(); if(t&&!s.has(t)){ s.add(t); out.push(t);} } return out; }
+function uniqNorm(arr){ const s=new Set(); const out=[]; for(const x of arr||[]){ const t=String(x||"").toLowerCase().trim(); if(t && !s.has(t)){ s.add(t); out.push(t);} } return out; }
 
 const http = axios.create({ timeout: 15000 });
 const parser = new XMLParser({ ignoreAttributes:false, attributeNamePrefix:"" });
@@ -85,33 +92,70 @@ function resolveGeo(language, region){
   let loc = DFS_LOCATION_CODE;
   const r = (region||"").toLowerCase();
   if (["us","united states","usa"].includes(r)) loc = 2840;
-  if (["mx","mexico","latam"].includes(r)) loc = 2056;
-  if (["es","spain"].includes(r)) loc = 2124;
+  if (["mx","mexico","latam"].includes(r))      loc = 2056;
+  if (["es","spain"].includes(r))               loc = 2124;
   return { lang, loc };
 }
 
+/* Stopwords & tokenización */
 const STOP_ES = new Set(["de","la","que","el","en","y","a","los","del","se","las","por","un","para","con","no","una","su","al","lo","como","más","pero","sus","le","ya","o","este","sí","porque","esta","entre","cuando","muy","sin","sobre","también","me","hasta","hay","donde","quien","desde"]);
 const STOP_EN = new Set(["the","of","to","and","a","in","is","it","you","that","for","on","with","as","are","this","be","or","by","from","at","an","have","has","how","what","why","which"]);
-function tokenizeKw(kw){ const s=stripAccents(String(kw||"").toLowerCase()); return s.split(/[^a-z0-9+]+/i).map(t=>t.trim()).filter(t=>t&&!STOP_ES.has(t)&&!STOP_EN.has(t)); }
+function tokenizeKw(kw){ const s=stripAccents(String(kw||"").toLowerCase()); return s.split(/[^a-z0-9+]+/i).map(t=>t.trim()).filter(t=>t && !STOP_ES.has(t) && !STOP_EN.has(t)); }
 function jaccard(aSet,bSet){ const a=new Set(aSet), b=new Set(bSet); const inter=[...a].filter(x=>b.has(x)).length; const uni=new Set([...a,...b]).size||1; return inter/uni; }
 
+/* Mapeo vertical simple */
 function mapVertical(topic){
   const t = String(topic||"").toLowerCase();
   if (t.includes("whatsapp")) return "whatsapp";
   if (t.includes("gmail") || t.includes("yahoo") || t.includes("entregabilidad") || t.includes("email")) return "email";
   if (t.includes("shopify") || t.includes("checkout")) return "ecommerce";
   if (t.includes("iso") || t.includes("pci") || t.includes("nis2") || t.includes("data act")) return "compliance";
+  if (t.includes("restaurant") || t.includes("pos")) return "ecommerce";
   return "generic";
 }
 
+/* Heurística enriquecida (incluye restaurant software) */
 function heuristicExpand(topic){
-  const t=(topic||"").toLowerCase(); const arr=[];
-  if (t.includes("pci")) arr.push("pci dss v4.0","auditoría pci","certificación pci dss","cumplimiento pci 2025","requisitos pci dss","qsa pci","saq pci dss","controles pci dss","normativa pci pagos","pci dss checklist 2025","procesadores pagos pci","servicio consultoría pci");
-  else if (t.includes("shopify")) arr.push("shopify checkout extensibility","migración checkout shopify","plantillas checkout shopify","apps checkout shopify","custom checkout shopify","checkout extensibility migration","checkout ui extensions","checkout editor","shopify functions checkout");
-  else if (t.includes("whatsapp")) arr.push("whatsapp business api precios","plantillas whatsapp 2025","verificación whatsapp","enrutamiento conversaciones whatsapp","wa cloud api pricing");
-  return arr;
+  const t=(topic||"").toLowerCase();
+  const out = [];
+  if (t.includes("pci")) {
+    out.push(
+      "pci dss v4.0","auditoría pci","certificación pci dss","cumplimiento pci 2025",
+      "requisitos pci dss","qsa pci","saq pci dss","controles pci dss","normativa pci pagos",
+      "pci dss checklist 2025","procesadores pagos pci","servicio consultoría pci"
+    );
+  } else if (t.includes("shopify") || t.includes("checkout")) {
+    out.push(
+      "shopify checkout extensibility","migración checkout shopify","plantillas checkout shopify",
+      "apps checkout shopify","custom checkout shopify","checkout extensibility migration",
+      "checkout ui extensions","checkout editor","shopify functions checkout"
+    );
+  } else if (t.includes("whatsapp")) {
+    out.push(
+      "whatsapp business api precios","plantillas whatsapp 2025","verificación whatsapp",
+      "enrutamiento conversaciones whatsapp","wa cloud api pricing"
+    );
+  }
+  // Restaurant / POS / Hospitality
+  if (/\brestaurant|food service|pos\b/i.test(t)) {
+    out.push(
+      "restaurant pos","point of sale for restaurants","restaurant management software",
+      "restaurant software pricing","best restaurant software","top restaurant pos systems",
+      "restaurant software for small business","restaurant software cloud",
+      "restaurant inventory management","restaurant scheduling software","restaurant payroll software",
+      "restaurant crm","restaurant loyalty program","restaurant online ordering system",
+      "restaurant delivery management","qr menu for restaurants","digital menu for restaurants",
+      "kitchen display system","kds for restaurants","table management software",
+      "reservation system for restaurants","restaurant kiosk software","self ordering kiosk restaurant",
+      "tip management software","labor cost control restaurant","food cost calculator software",
+      "restaurant pos price","restaurant pos cost","restaurant software plans",
+      "restaurant software quotes","restaurant pos vendors","restaurant software implementation"
+    );
+  }
+  return out;
 }
 
+/* Sanitización kw */
 function sanitizeKeywords(keywords){
   const MAX_LEN=80, BAD=/[?¿“”"<>#%{}|\\^~\[\]]/g;
   const cleaned=[], rejected=[];
@@ -125,6 +169,7 @@ function sanitizeKeywords(keywords){
   return { cleaned: uniqNorm(cleaned), rejected };
 }
 
+/* Urgencia (con boosts + piso opcional) */
 function computeUrgency(topic, region, serpSignals, allSignals){
   const vertical = mapVertical(topic); const today = new Date();
   const relevant = (allSignals||[]).filter(ev => (!vertical || ev.vertical===vertical) && (!region || ev.region===region));
@@ -141,9 +186,16 @@ function computeUrgency(topic, region, serpSignals, allSignals){
   if ((serpSignals?.freshShare||0)>=0.3) boost+=B_FRESH;
   const pattern=/\b(202[4-9]|migraci[oó]n|requisitos|obligatorio|v\d(\.\d)?)\b/i;
   if (pattern.test(String(topic))) boost+=B_PAT;
-  return Math.max(0, Math.min(1, base+boost));
+  let U = Math.max(0, Math.min(1, base+boost));
+  // Piso si hay actividad en SERP
+  if (U === 0) {
+    const hasActivity = (serpSignals?.hasNews === true) || ((serpSignals?.paa||[]).length >= 4);
+    if (hasActivity) U = Math.max(U, URGENCY_FLOOR);
+  }
+  return U;
 }
 
+/* Demand index */
 function computeDemandIndex(batch){
   const sv=Number(batch.total_sv||0), cpc=Number(batch.avg_cpc||0), trend=Number(batch.trend||0), trans=Number(batch.transactional_share||0);
   const svFactor=Math.min(1, Math.sqrt(sv)/220);
@@ -154,6 +206,7 @@ function computeDemandIndex(batch){
   return Number(demandIdx.toFixed(2));
 }
 
+/* Clustering Jaccard */
 function clusterKeywords(perKwItems){
   const entries=(perKwItems||[]).map(it=>({ ...it, tokens: tokenizeKw(it.keyword) })).filter(e=>e.tokens.length);
   const clusters=[]; let idSeq=1;
@@ -200,35 +253,87 @@ async function dfsSerpFeatures(keyword, pages, geo){
       if(t==="related_searches" && Array.isArray(it.items)) for(const r of it.items){ const txt=r.keyword||r.title||r.text; if(txt) related.push(String(txt).trim()); }
     }
     return { paid_density, serp_features_load, volatility:0.2, cost:UNIT.DFS_SERP_PAGE*(pages||1), serp_signals:{ hasNews, freshShare:Number(freshShare.toFixed(2)), paa, related } };
-  }catch(e){ return { paid_density:0.5, serp_features_load:0.5, volatility:0.2, cost:0, serp_signals:{ hasNews:false, freshShare:0, paa:[], related:[] } }; }
+  }catch(e){
+    logger.warn({ msg:"DFS SERP error", err:e.message });
+    return { paid_density:0.5, serp_features_load:0.5, volatility:0.2, cost:0, serp_signals:{ hasNews:false, freshShare:0, paa:[], related:[] } };
+  }
 }
 
 async function dfsKeywordsForKeywords(seeds, geo){
   if(!ENABLE_DATAFORSEO || !seeds?.length) return { keywords:[], cost:0 };
-  const auth={ username: DFS_LOGIN, password: DFS_PASSWORD }; const lang=geo?.lang||DFS_LANGUAGE_CODE; const loc=geo?.loc||DFS_LOCATION_CODE;
+  const auth={ username: DFS_LOGIN, password: DFS_PASSWORD };
+  const lang=geo?.lang||DFS_LANGUAGE_CODE;
+  const loc=geo?.loc||DFS_LOCATION_CODE;
   const seedList=uniqNorm(seeds).slice(0,10);
-  const payload=[{ location_code:loc, language_code:lang, keywords:seedList }];
+
+  const payload=[{
+    location_code: loc,
+    language_code: lang,
+    keywords: seedList,
+    include_seed: true
+  }];
+
   try{
-    const { data } = await http.post("https://api.dataforseo.com/v3/keywords_data/google_ads/keywords_for_keywords/live", payload, { auth });
-    const items=data?.tasks?.[0]?.result?.[0]?.items||[];
-    const kws=items.map(it=>String(it.keyword||"").trim()).filter(Boolean);
-    return { keywords: uniqNorm(kws).slice(0, MAX_KEYWORDS_EXPANDED), cost: UNIT.DFS_KFK_TASK };
-  }catch(e){ return { keywords:[], cost:0 }; }
+    const { data } = await http.post(
+      "https://api.dataforseo.com/v3/keywords_data/google_ads/keywords_for_keywords/live",
+      payload,
+      { auth }
+    );
+    const items = data?.tasks?.[0]?.result?.[0]?.items || [];
+
+    const kwList = [];
+    for (const it of items) {
+      const k =
+        it.keyword ||
+        it?.keyword_info?.keyword ||
+        it?.keyword_data?.keyword ||
+        it?.string || null;
+      if (k) kwList.push(String(k).trim());
+    }
+    return { keywords: uniqNorm(kwList).slice(0, MAX_KEYWORDS_EXPANDED), cost: UNIT.DFS_KFK_TASK };
+  } catch(e){
+    logger.warn({ msg:"DFS KfK error", err: e.message });
+    return { keywords:[], cost:0 };
+  }
 }
 
 async function dfsAutocompleteExpand(seeds, geo){
   if(!seeds?.length) return { keywords:[], cost:0 };
-  const auth={ username: DFS_LOGIN, password: DFS_PASSWORD }; const lang=geo?.lang||DFS_LANGUAGE_CODE; const loc=geo?.loc||DFS_LOCATION_CODE;
+  const auth={ username: DFS_LOGIN, password: DFS_PASSWORD };
+  const lang=geo?.lang||DFS_LANGUAGE_CODE;
+  const loc=geo?.loc||DFS_LOCATION_CODE;
+
+  const prefixes = ["best", "top", "affordable", "enterprise", "cloud"];
+  const suffixes = ["pricing", "cost", "plans", "implementation", "vendors", "near me"];
+  const variants = new Set();
+
+  for (const s0 of uniqNorm(seeds)) {
+    variants.add(s0);
+    for (const suf of suffixes) variants.add(`${s0} ${suf}`);
+    for (const pre of prefixes) variants.add(`${pre} ${s0}`);
+  }
+  for (const s0 of uniqNorm(seeds)) {
+    if (/\brestaurant\b/i.test(s0)) {
+      [
+        "restaurant pos","restaurant management software","restaurant online ordering",
+        "kitchen display system","restaurant inventory software","restaurant scheduling software"
+      ].forEach(v => variants.add(v));
+    }
+  }
+
   const out=new Set(); let cost=0;
-  for(const s of uniqNorm(seeds).slice(0,10)){
+  const list=[...variants].slice(0, 20);
+  for(const s of list){
     const payload=[{ keyword:s, language_code:lang, location_code:loc }];
     try{
       const { data } = await http.post("https://api.dataforseo.com/v3/serp/google/autocomplete/live", payload, { auth });
       const items=data?.tasks?.[0]?.result?.[0]?.items||[];
       for(const it of items) if(it.suggestion) out.add(String(it.suggestion).trim());
-      cost+=UNIT.DFS_AUTOCOMPLETE;
-    }catch(e){}
-    await sleep(200);
+      cost += UNIT.DFS_AUTOCOMPLETE;
+    }catch(e){
+      logger.warn({ msg:"DFS autocomplete error", seed:s, err:e.message });
+    }
+    await sleep(150);
   }
   return { keywords: Array.from(out), cost };
 }
@@ -237,11 +342,15 @@ async function dfsSearchVolumeChunks(keywords, geo){
   if(!ENABLE_DATAFORSEO) return { cost:0, total_sv:15000, avg_cpc:1.1, trend:0.12, transactional_share:0.6, items:[] };
   const { cleaned, rejected } = sanitizeKeywords(keywords);
   if(!cleaned.length) return { cost:0, total_sv:0, avg_cpc:0, trend:0, transactional_share:0, items:[] };
-  const auth={ username: DFS_LOGIN, password: DFS_PASSWORD }; const lang=geo?.lang||DFS_LANGUAGE_CODE; const loc=geo?.loc||DFS_LOCATION_CODE;
+  if (rejected.length) logger.warn({ msg:"SV rejected", count: rejected.length, sample: rejected.slice(0,5) });
+
+  const auth={ username: DFS_LOGIN, password: DFS_PASSWORD };
+  const lang=geo?.lang||DFS_LANGUAGE_CODE;
+  const loc=geo?.loc||DFS_LOCATION_CODE;
 
   const chunks=[]; for(let i=0;i<cleaned.length;i+=DFS_SV_BATCH_SIZE) chunks.push(cleaned.slice(i,i+DFS_SV_BATCH_SIZE));
   let total_sv=0, w_cpc=0, transCount=0, tasksCost=0; const months=new Map(); const perKw=[];
-  const isTrans=(kw,cpc,comp)=>{ const k=(kw||"").toLowerCase(); const pats=["precio","coste","comprar","proveedor","consultor","consultoría","auditor","servicio","software","herramienta","migración","implementación","oferta","tarifa","planes","apps","plugin","tool","extension","extensions"]; return pats.some(p=>k.includes(p)) || cpc>=0.5 || comp>=0.5; };
+  const isTrans=(kw,cpc,comp)=>{ const k=(kw||"").toLowerCase(); const pats=["price","pricing","cost","buy","vendor","consultant","service","software","tool","implementation","migration","plans","quote","plan","package","pos"]; return pats.some(p=>k.includes(p)) || cpc>=0.5 || comp>=0.5; };
 
   for(let c=0;c<chunks.length;c++){
     const payload=[{ location_code:loc, language_code:lang, keywords:chunks[c] }];
@@ -249,14 +358,26 @@ async function dfsSearchVolumeChunks(keywords, geo){
       const { data } = await http.post("https://api.dataforseo.com/v3/keywords_data/google_ads/search_volume/live", payload, { auth });
       const items=data?.tasks?.[0]?.result?.[0]?.items||[];
       for(const it of items){
-        const kw=String(it.keyword||""); const sv=Number(it.search_volume||0);
-        const cpc=Number((it.cpc&&it.cpc[0]?.value)||0); const comp=Number(it.competition||0);
-        const trans=isTrans(kw,cpc,comp); total_sv+=sv; w_cpc+=cpc*sv; if(trans) transCount++; perKw.push({ keyword:kw, sv, cpc, comp, transactional:trans });
+        const kw=String(it.keyword||"");
+        const sv=Number(it.search_volume||0);
+        const cpc=Number((it.cpc && (Array.isArray(it.cpc) ? it.cpc[0]?.value : it.cpc.value)) || 0);
+        const comp=Number(it.competition||0);
+        const trans=isTrans(kw,cpc,comp);
+        total_sv+=sv; w_cpc+=cpc*sv; if(trans) transCount++;
+        perKw.push({ keyword:kw, sv, cpc, comp, transactional:trans });
         const ms=it.monthly_searches||it.search_volume_by_month||[];
-        for(const m of ms){ const y=m.year||m.month?.split("-")?.[0]; const mon=m.month||(m.month_num&&String(m.month_num).padStart(2,"0")); const key=(y&&mon)?`${y}-${mon}`:null; const v=Number(m.search_volume||m.value||0); if(key) months.set(key,(months.get(key)||0)+v); }
+        for(const m of ms){
+          const y=m.year||m.month?.split("-")?.[0];
+          const mon=m.month||(m.month_num&&String(m.month_num).padStart(2,"0"));
+          const key=(y&&mon)?`${y}-${mon}`:null;
+          const v=Number(m.search_volume||m.value||0);
+          if(key) months.set(key,(months.get(key)||0)+v);
+        }
       }
       tasksCost+=UNIT.DFS_SV_TASK;
-    }catch(e){}
+    }catch(e){
+      logger.warn({ msg:"DFS SV error", err:e.message });
+    }
     if(c<chunks.length-1 && DFS_SLEEP_MS>0) await sleep(DFS_SLEEP_MS);
   }
 
@@ -304,21 +425,30 @@ async function bootstrapSources(){
 /* ==========================
    BILLING (fs json)
 ========================== */
+function currentMonthObj(){ return { month: currentMonth(), spent_usd: 0 }; }
 async function loadBilling(){
-  try{ const t=await fs.readFile(BILLING_PATH,"utf8"); const b=JSON.parse(t); if(b.month!==currentMonth()){ b.month=currentMonth(); b.spent_usd=0; await fs.writeFile(BILLING_PATH,JSON.stringify(b,null,2)); } return b; }
-  catch{ const fresh={month:currentMonth(), spent_usd:0}; await ensureDir(path.dirname(BILLING_PATH)); await fs.writeFile(BILLING_PATH,JSON.stringify(fresh,null,2)); return fresh; }
+  try{
+    const t=await fs.readFile(BILLING_PATH,"utf8");
+    const b=JSON.parse(t);
+    if(b.month!==currentMonth()){ const fresh=currentMonthObj(); await fs.writeFile(BILLING_PATH, JSON.stringify(fresh,null,2)); return fresh; }
+    return b;
+  }catch{
+    const fresh=currentMonthObj(); await ensureDir(path.dirname(BILLING_PATH)); await fs.writeFile(BILLING_PATH, JSON.stringify(fresh,null,2)); return fresh;
+  }
 }
 async function saveBilling(b){ await fs.writeFile(BILLING_PATH, JSON.stringify(b,null,2)); }
 
 /* ==========================
-   START (sin await top-level)
+   START
 ========================== */
 async function start(){
   await ensureDir(DATA_DIR);
   await bootstrapSources();
 
+  /* Health */
   app.get("/healthz", async (_req,res)=>{ const b=await loadBilling(); res.json({ ok:true, month:b.month, spent:b.spent_usd }); });
 
+  /* Debug fuentes */
   app.get("/signals/sources/debug", async (_req,res)=>{
     const envPath=process.env.SIGNALS_SOURCES_PATH||null;
     const envJson=!!process.env.SIGNALS_SOURCES_JSON;
@@ -328,10 +458,11 @@ async function start(){
     res.json({ env:{ SIGNALS_SOURCES_PATH:envPath, has_JSON:envJson, has_B64:envB64, SIGNALS_PATH }, cwd:process.cwd(), candidates, resolved:SOURCES_PATH_RESOLVED, origin:SOURCES_ORIGIN, head_preview:head });
   });
 
+  /* Cargar/poner fuentes */
   app.post("/signals/sources/put", async (req,res)=>{
     try{
       const body=req.body; const sources=Array.isArray(body)? body : (Array.isArray(body?.sources)? body.sources : null);
-      if(!sources) return res.status(400).json({ ok:false, error:"Provide array or {sources:[...]}" });
+      if(!sources) return res.status(400).json({ ok:false, error:"Provide array or {sources:[...]}"} );
       const target=process.env.SIGNALS_SOURCES_PATH || `${DATA_DIR}/signals_sources.json`;
       await ensureDir(path.dirname(target)); await fs.writeFile(target, JSON.stringify(sources,null,2), "utf8");
       SOURCES_PATH_RESOLVED=target; SOURCES_ORIGIN="put_endpoint";
@@ -339,7 +470,8 @@ async function start(){
     }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
   });
 
-  function guessVertical(title){ const t=(title||"").toLowerCase(); if(t.includes("pci"))return"compliance"; if(t.includes("nis2")||t.includes("data act"))return"compliance"; if(t.includes("shopify"))return"ecommerce"; if(t.includes("gmail")||t.includes("yahoo"))return"email"; if(t.includes("whatsapp"))return"whatsapp"; return"generic"; }
+  /* Auto-refresh señales (RSS/Atom) */
+  function guessVertical(title){ const t=(title||"").toLowerCase(); if(t.includes("pci"))return"compliance"; if(t.includes("nis2")||t.includes("data act"))return"compliance"; if(t.includes("shopify"))return"ecommerce"; if(t.includes("gmail")||t.includes("yahoo"))return"email"; if(t.includes("whatsapp"))return"whatsapp"; if(t.includes("pos")||t.includes("restaurant")) return "ecommerce"; return"generic"; }
   function guessRegionFromUrl(url){ if(!url) return process.env.SIGNALS_REGION_DEFAULT||"LATAM"; if(url.includes("europa.eu")) return "EU"; return process.env.SIGNALS_REGION_DEFAULT||"LATAM"; }
   function severityFromText(title){ const t=(title||"").toLowerCase(); if(t.includes("mandatory")||t.includes("obligatorio")||t.includes("deadline")) return 5; if(t.includes("required")||t.includes("requisitos")) return 4; return 3; }
 
@@ -348,7 +480,9 @@ async function start(){
       if(!SOURCES_PATH_RESOLVED) await bootstrapSources();
       const src=SOURCES_PATH_RESOLVED;
       if(!src || !fscore.existsSync(src)) return res.json({ ok:true, added:0, total:0, note:"signals_sources.json not found (post-bootstrap)" });
+
       let sources=[]; try{ const txt=await fs.readFile(src,"utf8"); const parsed=JSON.parse(txt); sources=Array.isArray(parsed)? parsed : (Array.isArray(parsed?.sources)? parsed.sources : []); }catch(e){ return res.status(400).json({ ok:false, error:"invalid_sources_json", detail:e.message }); }
+
       const raw=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); const arr=JSON.parse(raw); let added=0;
       for(const s of sources){
         if(!s?.url) continue;
@@ -371,7 +505,7 @@ async function start(){
             const idx=arr.findIndex(x=>x.id===id); const obj={ id, vertical, region, type:s.type||"platform", title, severity:sev, impact:imp, deadline, source_url:link, ttl_days:s.ttl_days||365, updated_at:new Date().toISOString() };
             if(idx>=0) arr[idx]={...arr[idx],...obj}; else { arr.push(obj); added++; }
           }
-        }catch(e){}
+        }catch(e){ logger.warn({ msg:"signals source error", url:s.url, err:e.message }); }
       }
       await ensureDir(path.dirname(SIGNALS_PATH)); await fs.writeFile(SIGNALS_PATH, JSON.stringify(arr,null,2));
       res.json({ ok:true, added, total:arr.length, used_path:src, origin:SOURCES_ORIGIN });
@@ -408,9 +542,46 @@ async function start(){
     }catch(e){ res.status(500).json({ ok:false, error:e.message }); }
   });
 
-  /* ===== SCORE & CLUSTER ===== */
-  const ScoreRunSchema = z.object({ topic:z.string().min(3).max(160), region:z.string().min(2).max(24).default("LATAM"), language:z.string().min(2).max(7).default("es") });
+  /* ====== DEBUG expansión keywords ====== */
+  app.post("/keywords/expand/debug", async (req,res)=>{
+    try{
+      const { topic, region="US", language="en" } = req.body || {};
+      const geo = resolveGeo(language, region);
+      const serp = await dfsSerpFeatures(topic, 1, geo);
+      const fromSerp = [].concat(serp.serp_signals?.paa||[]).concat(serp.serp_signals?.related||[]);
+      const heur = heuristicExpand(topic);
+      const kfk = await dfsKeywordsForKeywords([topic, ...fromSerp, ...heur], geo);
+      const auto = await dfsAutocompleteExpand([topic, ...heur], geo);
+      const rawSet = uniqNorm([topic, ...fromSerp, ...(kfk.keywords||[]), ...(auto.keywords||[]), ...heur]);
+      const { cleaned, rejected } = sanitizeKeywords(rawSet);
+      res.json({
+        counts: {
+          paa: (serp.serp_signals?.paa||[]).length,
+          related: (serp.serp_signals?.related||[]).length,
+          heur: heur.length,
+          kfk: (kfk.keywords||[]).length,
+          autocomplete: (auto.keywords||[]).length,
+          raw_total: rawSet.length,
+          cleaned: cleaned.length,
+          rejected: rejected.length
+        },
+        samples: {
+          paa: (serp.serp_signals?.paa||[]).slice(0,10),
+          related: (serp.serp_signals?.related||[]).slice(0,10),
+          heur: heur.slice(0,20),
+          kfk: (kfk.keywords||[]).slice(0,30),
+          autocomplete: (auto.keywords||[]).slice(0,30),
+          cleaned: cleaned.slice(0,50),
+          rejected: rejected.slice(0,20)
+        }
+      });
+    }catch(e){
+      res.status(500).json({ error:"debug_failed", detail:e.message });
+    }
+  });
 
+  /* ====== SCORE ====== */
+  const ScoreRunSchema = z.object({ topic:z.string().min(3).max(160), region:z.string().min(2).max(24).default("LATAM"), language:z.string().min(2).max(7).default("es") });
   async function getSignals(){ try{ const t=await fs.readFile(SIGNALS_PATH,"utf8").catch(()=> "[]"); return JSON.parse(t); }catch{ return []; } }
 
   app.post("/score/run", async (req,res)=>{
@@ -421,24 +592,28 @@ async function start(){
       const serp=await dfsSerpFeatures(topic,1,geo);
       const fromSerp=[].concat(serp.serp_signals?.paa||[]).concat(serp.serp_signals?.related||[]);
       const heur=heuristicExpand(topic);
-      const seeds=uniqNorm([topic, ...heur, ...fromSerp]);
-      const kfk=await dfsKeywordsForKeywords(seeds, geo);
+      const kfk=await dfsKeywordsForKeywords(uniqNorm([topic, ...fromSerp, ...heur]), geo);
       const auto=await dfsAutocompleteExpand([topic, ...heur], geo);
       const kwSet=uniqNorm([topic, ...fromSerp, ...(kfk.keywords||[]), ...(auto.keywords||[]), ...heur]).slice(0, MAX_KEYWORDS_EXPANDED);
-      const svAgg=await dfsSearchVolumeChunks(kwSet, geo);
-      const clusters=clusterKeywords(svAgg.items);
 
+      let svAgg=await dfsSearchVolumeChunks(kwSet, geo);
+      // Fallback demanda a US/en si 0
+      if (svAgg.total_sv === 0 && (language || "").toLowerCase() !== "en") {
+        const geoAlt = resolveGeo("en", "US");
+        const svAlt  = await dfsSearchVolumeChunks(kwSet, geoAlt);
+        if (svAlt.total_sv > svAgg.total_sv) svAgg = { ...svAgg, ...svAlt };
+      }
+
+      const clusters=clusterKeywords(svAgg.items);
       const signals=await getSignals();
-      const U=computeUrgency(topic, region, serp.serp_signals, signals);
+      let U=computeUrgency(topic, region, serp.serp_signals, signals);
       const DemandIdx=computeDemandIndex(svAgg);
       const CompIdx=Math.max(0, Math.min(1, 1 - (0.55 + serp.paid_density + serp.serp_features_load)/2.5 + 0.2*serp.volatility ));
       const PlatFit=0.7, Oper=0.8; const TtC=U>=0.6 ? 14 : 24; const GP=18320; const ProfitIdx=Math.max(0,Math.min(1,GP/20000)); const gTtC=Math.max(0,Math.min(1,(30-TtC)/20));
       const score = 25*U + 15*gTtC + 15*ProfitIdx + 15*DemandIdx + 15*CompIdx + 10*PlatFit + 5*Oper;
       const decision = (score>=70 && U>=0.6 && TtC<=21) ? "GO" : (score>=60 ? "CONDITIONAL" : "NO-GO");
 
-      const bill=await loadBilling();
-      bill.spent_usd += (serp.cost||0) + (svAgg.cost||0) + (kfk.cost||0) + (auto.cost||0);
-      await saveBilling(bill);
+      const bill=await loadBilling(); bill.spent_usd += (serp.cost||0) + (svAgg.cost||0) + (kfk.cost||0) + (auto.cost||0); await saveBilling(bill);
 
       res.json({
         topic, region, language,
@@ -447,11 +622,13 @@ async function start(){
         cost:{ run_usd:Number(((serp.cost||0)+(svAgg.cost||0)+(kfk.cost||0)+(auto.cost||0)).toFixed(3)), month_spent_usd: bill.spent_usd },
         demand_meta:{ keywords_used: kwSet.length, total_sv: svAgg.total_sv, avg_cpc:Number(svAgg.avg_cpc.toFixed(2)), trend_12m:Number(svAgg.trend.toFixed(2)), transactional_share:Number(svAgg.transactional_share.toFixed(2)), clusters_count: clusters.length },
         serp_meta: serp.serp_signals,
+        keywords_sample: kwSet.slice(0,50),
         clusters_top: clusters.slice(0,10).map(c=>({ id:c.id, label:c.label, total_sv:c.total_sv, avg_cpc:c.avg_cpc, transactional_ratio:c.transactional_ratio, size:c.size, sample_queries:c.sample_queries }))
       });
     }catch(e){ res.status(500).json({ error:"internal_error", detail:e.message }); }
   });
 
+  /* ====== CLUSTER ====== */
   const ClusterRunSchema = ScoreRunSchema;
   app.post("/keywords/cluster", async (req,res)=>{
     const parsed=ClusterRunSchema.safeParse(req.body);
@@ -464,14 +641,21 @@ async function start(){
       const kfk=await dfsKeywordsForKeywords(uniqNorm([topic, ...fromSerp, ...heur]), geo);
       const auto=await dfsAutocompleteExpand([topic, ...heur], geo);
       const kwSet=uniqNorm([topic, ...fromSerp, ...(kfk.keywords||[]), ...(auto.keywords||[]), ...heur]).slice(0, MAX_KEYWORDS_EXPANDED);
-      const svAgg=await dfsSearchVolumeChunks(kwSet, geo);
+
+      let svAgg=await dfsSearchVolumeChunks(kwSet, geo);
+      if (svAgg.total_sv === 0 && (language || "").toLowerCase() !== "en") {
+        const geoAlt = resolveGeo("en", "US");
+        const svAlt  = await dfsSearchVolumeChunks(kwSet, geoAlt);
+        if (svAlt.total_sv > svAgg.total_sv) svAgg = { ...svAgg, ...svAlt };
+      }
+
       const clusters=clusterKeywords(svAgg.items);
       const bill=await loadBilling(); bill.spent_usd += (serp.cost||0) + (svAgg.cost||0) + (kfk.cost||0) + (auto.cost||0); await saveBilling(bill);
-      res.json({ topic, region, language, counts:{ keywords: kwSet.length, clusters: clusters.length }, totals:{ sv: svAgg.total_sv, avg_cpc:Number(svAgg.avg_cpc.toFixed(2)) }, clusters, cost:{ run_usd:Number(((serp.cost||0)+(svAgg.cost||0)+(kfk.cost||0)+(auto.cost||0)).toFixed(3)), month_spent_usd: bill.spent_usd } });
+      res.json({ topic, region, language, counts:{ keywords: kwSet.length, clusters: clusters.length }, totals:{ sv: svAgg.total_sv, avg_cpc:Number(svAgg.avg_cpc.toFixed(2)) }, keywords_sample: kwSet.slice(0,50), clusters, cost:{ run_usd:Number(((serp.cost||0)+(svAgg.cost||0)+(kfk.cost||0)+(auto.cost||0)).toFixed(3)), month_spent_usd: bill.spent_usd } });
     }catch(e){ res.status(500).json({ error:"internal_error", detail:e.message }); }
   });
 
-  /* ===== LEADS & CAPTACIÓN ===== */
+  /* ====== LEADS & CAPTACIÓN ====== */
   app.post("/leads/collect", async (req,res)=>{ try{
     const raw=await fs.readFile(DB_PATH,"utf8").catch(()=> JSON.stringify({leads:[]})); const db=JSON.parse(raw); db.leads=db.leads||[];
     const lead={...req.body, ts:new Date().toISOString()}; db.leads.push(lead);
@@ -534,4 +718,6 @@ if(!r.ok) throw new Error(); ok.classList.remove('hidden'); er.classList.add('hi
 
   app.listen(PORT, () => logger.info(`Market Intel Suite running on :${PORT}`));
 }
+
 start();
+
